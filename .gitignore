@@ -26,3 +26,24 @@ tmp/
 # IDE
 .vscode/
 .idea/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Docker / DB volumes (ajuste se usar outro nome)
+pgdata/
+data/
+tmp/
+
+# OS/IDE
+.DS_Store
+.vscode/
+.idea/
