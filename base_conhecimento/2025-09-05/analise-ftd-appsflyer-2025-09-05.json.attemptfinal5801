@@ -1,0 +1,57 @@
+{
+"id": "analise-ftd-appsflyer-2025-09-05",
+"data": "2025-09-05",
+"autor": "[CONFIRMAR: nome do autor,]",
+"projeto": "Análise FTD AppsFlyer + Funil",
+"tipo": "implementacao",
+"contexto": "Construir um pipeline em Python para analisar raw data de in-app events exportado do AppsFlyer (CSV) do app EstrelaBet, com foco em métricas de FTD (First Time Deposit), qualidade (suspeito), tempos de jornada e um funil por famílias de eventos. Restrições: 1) O nome do arquivo CSV varia após o prefixo; 2) Trabalhar com colunas e sem converter timezones; 3) CSV ~14MB (podendo crescer); 4) Entregar um XLSX 'analise_ftd.xlsx' com 3 abas (FTDs, Fontes, Campanha_final) e gráficos de funil (geral e por media source) como imagens centradas; 5) Documentar as abas/colunas em um PDF.",
+"descricao": "Implementado script analise_ftd.py que localiza o CSV pelo prefixo co.br.bet.estrelabet.app_in-app-events_*.csv, calcula métricas por AppsFlyer ID focadas no evento FTD App_DepositFlowPaymentPage_FTD, checa eventos obrigatórios anteriores, rotula suspeito (tempo <5s entre início de depósito e FTD ou zero engajamento), computa tempos (minutos, 2 casas) e suas medianas globais, agrega por Fonte e Global, e gera um Excel com filtros/auto-largura. Adicionalmente: calculado tempo FTD→Withdraw considerando qualquer evento que comece com App_Withdrawal, gerado PDF de documentação, e criado conjunto de gráficos de funil como imagens de barras horizontais centralizadas (um geral e um por Media Source), colados no Excel em abas dedicadas.",
+"passos": [
+{
+"etapa": "Carregar CSV por prefixo e validar colunas",
+"motivo": "Arquivo muda de nome por período; precisamos robustez para pegar o correto sem hardcode.",
+"alternativas": [
+"Hardcode do nome completo (não usada porque o sufixo muda a cada export do AppsFlyer).",
+"Input por linha de comando (considerada mas descartada por simplicidade do uso atual).",
+"Glob por prefixo + pegar o último alfabeticamente (usada - atende variação de nome e é simples).",],
+"codigo_detalhado": "files = sorted(glob.glob(FILE_PREFIX + '.csv'))\npath = files[-1,]\ndf = pd.read_csv(path, dtype=str)",
+"comandos_executados": [
+"python analise_ftd.py",],
+"resultados": "Mensagem no console: 'Lendo: co.br.bet.estrelabet.app_in-app-events_2025-08-10_2025-09-05_America_Sao_Paulo.csv'",
+"tempo_execucao": "2-5 segundos para localizar e ler 14MB (depende do disco)",
+"problemas_enfrentados": [
+{
+"erro": "Colunas obrigatórias ausentes (quando export difere do padrão)",
+"descoberta": "Nem sempre todas colunas aparecem dependendo de configuração de export.",
+"tentativas": [
+"tentativa 1: seguir com o script (resultou em KeyError).",
+"tentativa 2: adicionar checagem e mensagem clara de colunas faltantes (KeyError com lista).",
+"tentativa 3: documentar a lista exigida e falhar cedo.",],
+"solucao_final": "Validação explícita e erro descritivo com nomes das colunas que faltam.",
+"tempo_perdido": "5-10 minutos",
+"como_evitar": "Padronizar export no AppsFlyer e manter checklist de colunas.",}
+]
+},
+{
+"etapa": "Cálculo das métricas por FTD (aba FTDs)",
+"motivo": "Analisar usuários que realmente fizeram o primeiro depósito e métricas de qualidade/tempo.",
+"alternativas": [
+"Usar todos FTDs (não usada: FTD deve ser único; por definição é First).",
+"Deduplicar por AppsFlyer ID mantendo o mais antigo (usada - garante o primeiro FTD real).",
+"Deduplicar por (ID, dia) (descartada: não faz sentido para FTD único).",],
+"codigo_detalhado": "ftds = df[df['Event Name',]==FTD_EVENT,].sort_values(['AppsFlyer ID','Event Time',])\nftds_first = ftds.drop_duplicates(subset=['AppsFlyer ID',], keep='first')\n# Eventos obrigatórios antes do FTD\nhas_req1 = (hist['Event Name',]=='App_DepositFlow_InputAmount_Filled').any()\nhas_req2 = (hist['Event Name',]=='App_DepositFlowPaymentPage_Started').any()\n# Início depósito→FTD\nstart = hist[hist['Event Name',]=='App_DepositFlowPaymentPage_Started',]['Event Time',].max()\ndelta_dep_min = round((ftd_time - start).total_seconds()/60, 2)\nflag_tempo = (ftd_time - start).total_seconds() < 5.0\n# Engajamento\nengaj = hist[~hist['Event Name',].str.startswith('App_DepositFlow') & (hist['Event Name',]!=FTD_EVENT),]\nengaj_qtd = len(engaj)\nflag_engaj = (engaj_qtd==0)\n# Install→FTD e Click→Install\n# FTD→Withdraw (qualquer evento iniciando com 'App_Withdrawal')\nwithdraw = after['Event Name',].str.lower().str.startswith('App_Withdrawal'.lower(), na=False)\nnext_w = after.loc[withdraw, 'Event Time',].min()\ndelta_ftd_w_min = round((next_w - ftd_time).total_seconds()/60, 2)",
+"comandos_executados": [
+"python analise_ftd.py",],
+"resultados": "Aba FTDs criada com colunas: 'Eventos Anteriores', 'Inicio Deposito e FTD (min)', 'Mediana Inicio Deposito (min)', 'Flag Tempo <5s', 'Engajamento (qtd eventos não-depósito)', 'Flag Engajamento', 'Install → FTD (min)', 'Mediana Install → FTD (min)', 'Clique → Install (min)', 'Mediana Clique → Install (min)', 'FTD → Withdraw (min)', 'Mediana FTD → Withdraw (min)'.",
+"tempo_execucao": "5-15 segundos para processar e montar a aba (14MB, ~100k-300k linhas estimadas)",
+"problemas_enfrentados": [
+{
+"erro": "Detecção de saque não funcionou (nome do evento variava como 'App_WithdrawalXXX')",
+"descoberta": "O nome não é fixo; há sufixos.",
+"tentativas": [
+"tentativa 1: igualdade exata 'Event Name' == 'App_Withdrawal' (não achava) ",
+"tentativa 2: usar startswith('App_Withdrawal') case-insensitive (passou a detectar) ",
+"tentativa 3: confirmar que 'App_WithdrawalFlow_' também é família válida para funil",],
+"solucao_final": "Trocar comparação por prefixo startswith('App_Withdrawal') para FTD→Withdraw e considerar 'App_WithdrawalFlow' para a etapa de funil.",
+"tempo_perdido": "10-15 minutos",
+"como_evitar": "Mapear lista de eventos válidos previamente e padronizar nomeclatura em tracking.",}

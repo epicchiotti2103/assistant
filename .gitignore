@@ -1,7 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 .env
 .env.*
-data/
+!.env.example
+
+# Build / cache
+*.log
+.mypy_cache/
+.pytest_cache/
+ruff_cache/
+coverage.xml
+htmlcov/
+
+# OS
 .DS_Store
-__pycache__/
-*.pyc
-.venv/
+
+# Docker/DB volumes (ajuste conforme sua pasta)
+pgdata/
+data/
+tmp/
+
+# IDE
+.vscode/
+.idea/

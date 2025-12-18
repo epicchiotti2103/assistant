@@ -1,11 +1,28 @@
 services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: assistant
+      POSTGRES_USER: assistant
+      POSTGRES_PASSWORD: assistant
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
   api:
     build: .
     ports:
       - "8000:8000"
     env_file:
       - .env
+    depends_on:
+      - db
     volumes:
       - ./app:/app/app
-      - ./data:/app/data
+      - ./base_conhecimento:/app/base_conhecimento:ro
     restart: unless-stopped
+
+volumes:
+  pgdata:

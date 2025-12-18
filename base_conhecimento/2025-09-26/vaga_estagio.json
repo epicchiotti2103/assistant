@@ -1,0 +1,342 @@
+{
+"id": "formulario-estagio-caracol-2025-09-30",
+"data": "2025-09-30",
+"autor": "Elio",
+"projeto": "Formulário de Estágio — Caracol Media",
+"tipo": "implementacao",
+"contexto": "Construir um funil completo para receber candidaturas de estágio via site público (GitHub Pages/estático), enviar os dados a uma API Flask na VM GCP (Gunicorn + Nginx), armazenar currículos no Google Cloud Storage e dados no BigQuery, e integrar postbacks do iRev (clique e conversão). Restrições: front estático, backend sob Nginx com CORS, bucket GCS com Uniform Bucket-Level Access (UBLA), schema do BQ deve tolerar variações de preenchimento. Stakeholders: time Caracol (Vendas & Marketing, Operações), candidato final. Prazo: imediato (set 2025).",
+"descricao": "Integração ponta a ponta: landing captura clickid, dispara postback de clique (goal 4), leva o usuário ao formulário multi-steps; formulário valida e envia via multipart para Flask; a API faz upload do PDF no GCS, normaliza dados, insere no BQ (databasecaracol.recrutamento.candidatos_estagio), responde JSON. Na confirmação, o front mostra 'Obrigado' e dispara postback de conversão (goal 11). Ajustes críticos: CORS Nginx (remoção de header duplicado), correção do acesso ACL no GCS sob UBLA, schema do BQ (incluir clickid e metadados), propagação estável do clickid entre páginas e no backend, proteção contra múltiplos submits no front.",
+"passos": [
+{
+"etapa": "Configurar e validar serviço Flask com Gunicorn + systemd",
+"motivo": "Servir a API em 127.0.0.1:8080 atrás do Nginx, com reinício simples via systemd.",
+"alternativas": [
+"Rodar Flask com flask run (não usada por não ser produção e não integrar com systemd)",
+"Uvicorn/ASGI (considerada mas descartada por simplicidade: app atual WSGI + Gunicorn)",
+"Gunicorn + systemd (usada - padrão simples, logs via journalctl, já implantado)"
+],
+"codigo_detalhado": "Service unit /etc/systemd/system/caracol-form.service com ExecStart chamando gunicorn: .../.venv/bin/gunicorn -w 3 -b 127.0.0.1:8080 app:app.",
+"comandos_executados": [
+"sudo systemctl status caracol-form –no-pager",
+"sudo systemctl restart caracol-form",
+"sudo journalctl -u caracol-form -f"
+],
+"resultados": "Logs reais:\n[2025-09-26 13:45:20 +0000] [659048] [INFO] Starting gunicorn 23.0.0\n[2025-09-26 13:45:20 +0000] [659048] [INFO] Listening at: http://127.0.0.1:8080 (659048)\n[2025-09-26 13:45:20 +0000] [659049] [INFO] Booting worker with pid: 659049",
+"tempo_execucao": "5 minutos",
+"problemas_enfrentados": [
+{
+"erro": "Dúvida sobre o nome do serviço systemd",
+"descoberta": "A unit correta era caracol-form.service (vista nos logs).",
+"tentativas": [
+"tentativa 1: sudo systemctl restart nome-do-seu-servico.service → Unit not found",
+"tentativa 2: sudo systemctl status caracol-form --no-pager → encontrou e ativo",
+"tentativa 3: sudo systemctl daemon-reload e restart para garantir recarregamento"
+],
+"solucao_final": "Usar sempre caracol-form como nome do serviço.",
+"tempo_perdido": "10 minutos",
+"como_evitar": "Padronizar o nome em README/Doc; systemctl list-units | grep caracol para descobrir."
+}
+]
+},
+{
+"etapa": "Ajustar Nginx e CORS (api.caracol.media)",
+"motivo": "Liberar o origin do site estático https://caracol.media para POST multipart e preflight OPTIONS sem erros e sem duplicar headers.",
+"alternativas": [
+"Ativar CORS no Flask (não usada: melhor centralizar no Nginx e evitar duplicação)",
+"Usar add_header ... always em dois lugares (descartada: causou header duplicado e erro de CORS)",
+"Single Access-Control-Allow-Origin por resposta (usada - solução estável)"
+],
+"codigo_detalhado": "Bloco location /api/ { ... } com if ($request_method = OPTIONS) { add_header ... return 204; } e nas respostas reais apenas um add_header 'Access-Control-Allow-Origin' $cors_allow_origin always; e add_header 'Vary' 'Origin' always;.",
+"comandos_executados": [
+"sudo nano /etc/nginx/sites-available/caracol-api",
+"sudo nginx -t && sudo systemctl reload nginx",
+"sudo ss -tlnp | grep -E ':443|:80'"
+],
+"resultados": "Antes (erro real no console):\nAccess to fetch at 'https://api.caracol.media/api/form' from origin 'https://caracol.media' has been blocked by CORS policy: The 'Access-Control-Allow-Origin' header contains multiple values 'https://caracol.media, https://caracol.media'\n\nDepois:\ncurl -i -X OPTIONS https://api.caracol.media/api/form -H 'Origin: https://caracol.media' … → HTTP/2 204 (e depois vimos 200 OK conforme conf de app).",
+"tempo_execucao": "30 minutos",
+"problemas_enfrentados": [
+{
+"erro": "Header Access-Control-Allow-Origin duplicado",
+"descoberta": "Havia duas diretivas add_header ... aplicando o mesmo header no preflight e na resposta final em locais diferentes causem duplicidade.",
+"tentativas": [
+"tentativa 1: manter ambos com always → continuou duplicando",
+"tentativa 2: padronizar para uma única emissão do header por resposta → resolveu",
+"tentativa 3: validar com curl -X OPTIONS e Vary: Origin presente → OK"
+],
+"solucao_final": "Consolidar CORS no Nginx e garantir apenas 1 Access-Control-Allow-Origin.",
+"tempo_perdido": "25 minutos",
+"como_evitar": "Documentar bloco padrão CORS; usar curl -i -X OPTIONS sempre que alterar."
+}
+]
+},
+{
+"etapa": "Testes HTTP ponta-a-ponta (sem CV e com CV)",
+"motivo": "Garantir que a rota receba multipart e responda JSON consistente.",
+"alternativas": [
+"Testar apenas via navegador (não usada: difícil inspecionar payload e CORS com precisão)",
+"Usar cURL com -F (usada - reproduz browser multipart facilmente)",
+"Usar Postman/Insomnia (considerada, mas cURL já suficiente)"
+],
+"codigo_detalhado": "Envio sem CV:\ncurl -i -X POST https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -F nomePreferido='Teste' -F email='teste@caracol.media' -F cidadeEstado='SP' -F curso='ADM' -F ingles='Intermediário' -F trilha='Vendas & Marketing' -F skills='[\"Excel\",\"Sheets\"]' -F questionario='[{\"id\":\"q1\",\"tipo\":\"single_choice\",\"resposta\":\"Sim\"}]'",
+"comandos_executados": [
+"curl -i -X POST https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -F nomePreferido='Teste' -F email='teste@caracol.media' -F cidadeEstado='SP' -F curso='ADM' -F ingles='Intermediário' -F trilha='Vendas & Marketing' -F skills='["Excel"]' -F questionario='[{"id":"q1","tipo":"single_choice","resposta":"Sim"}]'",
+"curl -i -X POST https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -F nomePreferido='Teste CV' -F email='teste2@caracol.media' -F cidadeEstado='SP' -F curso='ADM' -F ingles='Intermediário' -F trilha='Vendas & Marketing' -F skills='["Excel"]' -F questionario='[{"id":"q1","tipo":"single_choice","resposta":"Sim"}]' -F cv=@curriculo.pdf"
+],
+"resultados": "Resposta real (sem CV): HTTP/2 200 … {"cv_gcs_uri":null,"cv_public_url":null,"ok":true}\nErro esperado (teste local sem arquivo): curl: (26) Failed to open/read local data from file/application (não afeta produção; faltou arquivo local).",
+"tempo_execucao": "15 minutos",
+"problemas_enfrentados": [
+{
+"erro": "OPTIONS 200 vs 204 e comportamento CORS",
+"descoberta": "Nginx retornando 204 no preflight inicialmente (OK); depois 200 ao mover lógica; o importante é o header correto e permitir POST.",
+"tentativas": [
+"cURL OPTIONS → 204/200 com cabeçalhos corretos",
+"Testes no browser → CORS ok",
+"Revisar Vary: Origin e origem liberada"
+],
+"solucao_final": "Manter cabeçalhos estáveis e testar ambos fluxos.",
+"tempo_perdido": "10 minutos",
+"como_evitar": "Check-list CORS com curl -X OPTIONS sempre."
+}
+]
+},
+{
+"etapa": "Corrigir erro GCS sob UBLA (ACL legacy proibida)",
+"motivo": "Bucket com Uniform Bucket-Level Access não permite operações de ACL por objeto.",
+"alternativas": [
+"Voltar a ACL por objeto (não usada: inseguro e contraria UBLA)",
+"Tentar blob.acl no código (descartada: gera erro 400 ACL/UBLA)",
+"Usar apenas IAM + URLs assinadas/public_url (usada - compatível UBLA)"
+],
+"codigo_detalhado": "No app.py, remover/levar a try/except para qualquer chamada a blob.acl.get()/acl.save(); usar blob.public_url apenas se o bucket for público ou gerar URL assinada quando necessário.",
+"comandos_executados": [
+"python3 app.py (execução local para reproduzir erro)",
+"sudo journalctl -u caracol-form -f (após deploy)"
+],
+"resultados": "Erro real no front vindo do backend: 400 GET https://storage.googleapis.com/storage/v1/…/acl: Cannot get legacy ACL for an object when uniform bucket-level access is enabled.",
+"tempo_execucao": "20 minutos",
+"problemas_enfrentados": [
+{
+"erro": "UBLA bloqueando leitura de ACL do objeto",
+"descoberta": "O código tentava GET .../acl via client lib; com UBLA, precisa evitar ACL por objeto.",
+"tentativas": [
+"Desabilitar UBLA (não aceitável)",
+"Tentar capturar exceção e prosseguir sem ACL (funcionou)",
+"Padronizar retorno para não depender de ACL pública"
+],
+"solucao_final": "Remover uso de ACL, tratar public_url condicionalmente.",
+"tempo_perdido": "20 minutos",
+"como_evitar": "Assumir UBLA por padrão; evitar qualquer chamada a ACL legado no código."
+}
+]
+},
+{
+"etapa": "Propagar clickid e disparar postbacks iRev",
+"motivo": "Medição de performance de mídia: postback de clique na landing e postback de conversão no 'Obrigado'.",
+"alternativas": [
+"Postback server-side (considerada; robusta, mas exigiria mudança no app.py agora)",
+"Postback client-side via fetch(..., keepalive:true) (usada — rápida e suficiente)",
+"Imagem beacon (fallback em caso de bloqueio) (usada como backup)"
+],
+"codigo_detalhado": "Landing (index.html):\n- Captura clickid de location.search → localStorage.irev_clickid.\n- Reescreve CTAs (classe cta-quero-crescer) preservando caminho relativo e adicionando ?clickid=... com new URL(href, location.href).\n- No click, dispara GET https://caracol.irev.com/backend/api/v3/goal-type-fire/4?hash=<clickid> com fetch(..., {no-cors, keepalive}).\n\nFormulário (detalhes-estagio.html):\n- getClickId() lê de query/localStorage.\n- Em enviarFormulario (sucesso): mostra 'Obrigado' e dispara GET .../goal-type-fire/11?hash=<clickid> (goal 11) com dedupe em localStorage.",
+"comandos_executados": [
+"DevTools → Network (verificar GET goal-type-fire/4 no clique do CTA)",
+"DevTools → Network (verificar GET goal-type-fire/11 no sucesso do form)"
+],
+"resultados": "Clique: request visível para .../goal-type-fire/4?hash=2fcfa28b... e navegação correta para detalhes-estagio.html?clickid=....\nConversão: request para .../goal-type-fire/11?hash=... logo após exibir 'Obrigado'.",
+"tempo_execucao": "35 minutos",
+"problemas_enfrentados": [
+{
+"erro": "404 em GitHub Pages após reescrever href",
+"descoberta": "Construir URL com location.origin quebrou subpastas do Pages (case e path).",
+"tentativas": [
+"Montar URL absoluta → 404 em subpastas",
+"Usar new URL(href, location.href) e reconstituir pathname+query+hash → OK",
+"Garantir href=\"./detalhes-estagio.html\" relativo → OK"
+],
+"solucao_final": "Função ensureCtaHasClickId preservando caminho relativo e apenas alterando query.",
+"tempo_perdido": "30 minutos",
+"como_evitar": "Evitar location.origin ao reescrever links em sites publicados em subpastas."
+}
+]
+},
+{
+"etapa": "Garantir persistência de clickid no BigQuery",
+"motivo": "clickid estava chegando no front, mas coluna vazia no BQ.",
+"alternativas": [
+"Mandar clickid || null (não usada: FormData converte null em string 'null')",
+"Enviar apenas se existir (usada: if (clickid) fd.append('clickid', clickid)) e mapear no backend",
+"Enviar string vazia (aceitável, mas preferimos não enviar quando ausente)"
+],
+"codigo_detalhado": "No front: substituir fd.append('clickid', clickid || null); por if (clickid) fd.append('clickid', clickid);.\nNo backend: adicionar clickid = norm_str(request.form.get('clickid')) e incluir row['clickid'] = clickid.\nDDL BQ: ALTER TABLE databasecaracol.recrutamento.candidatos_estagio ADD COLUMN IF NOT EXISTS clickid STRING;",
+"comandos_executados": [
+"bq query –use_legacy_sql=false 'ALTER TABLE databasecaracol.recrutamento.candidatos_estagio ADD COLUMN IF NOT EXISTS clickid STRING'"
+],
+"resultados": "Após ajuste, linhas novas apresentam clickid preenchido quando presente.",
+"tempo_execucao": "20 minutos",
+"problemas_enfrentados": [
+{
+"erro": "Coluna clickid vazia",
+"descoberta": "Backend não estava incluindo clickid no dict inserido no BQ; front mandava 'null' como texto.",
+"tentativas": [
+"Apenas criar coluna no BQ → não resolveu",
+"Ajustar front para não mandar 'null' → ainda não aparecia",
+"Adicionar clickid na coleta backend e no row → resolveu"
+],
+"solucao_final": "Coleta e mapeamento correto no app.py + DDL no BQ.",
+"tempo_perdido": "25 minutos",
+"como_evitar": "Checklist de campos front ↔ backend ↔ schema antes do deploy."
+}
+]
+}
+],
+"ambiente_tecnico": {
+"linguagem": "Python (backend), JavaScript/HTML/CSS (frontend), Nginx (proxy), Shell",
+"versao": "Python 3.11.x; gunicorn 23.0.0; nginx/1.22.1; Google Cloud SDK [CONFIRMAR versão]; google-cloud-bigquery [CONFIRMAR]; google-cloud-storage [CONFIRMAR]",
+"dependencias": [
+"Flask==[CONFIRMAR] (framework web da API)",
+"gunicorn==23.0.0 (servidor WSGI)",
+"google-cloud-storage==[CONFIRMAR] (upload GCS)",
+"google-cloud-bigquery==[CONFIRMAR] (insert no BQ)",
+"requests==[CONFIRMAR] (opcional para postbacks server-side)"
+],
+"configuracoes_ambiente": [
+"SO: Ubuntu 22.04 LTS [CONFIRMAR]",
+"Sistema: VM GCP (zona us-central1-a)",
+"Serviço: systemd unit caracol-form.service",
+"Gunicorn: 3 workers, bind 127.0.0.1:8080",
+"Nginx: escuta :80 e :443, proxy_pass para 127.0.0.1:8080",
+"TLS: Let's Encrypt [CONFIRMAR]",
+"CORS: origin permitido https://caracol.media",
+"Bucket GCS: caracol-cvs (UBLA ON)"
+],
+"estrutura_arquivos": "Raiz VM: ~/caracol-form/app.py (API); venv .venv/; /etc/nginx/sites-available/caracol-api (site conf); GitHub Pages: index.html (landing) e detalhes-estagio.html (form)."
+},
+"exemplos_reais": {
+"input_exemplo": "POST multipart para /api/form com campos: nomePreferido, email, cidadeEstado, curso, ingles, trilha, skills (JSON), questionario (JSON), cv (PDF opcional), clickid, utm_*",
+"output_amostra": "{"ok":true,"cv_gcs_uri": "gs://caracol-cvs/cvs/2025/09/ABC.pdf", "cv_public_url": null}",
+"comando_execucao": "curl -i -X POST https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -F nomePreferido='Teste' -F email='teste@caracol.media' -F cidadeEstado='SP' -F curso='ADM' -F ingles='Intermediário' -F trilha='Vendas & Marketing' -F skills='["Excel"]' -F questionario='[{"id":"q1","tipo":"single_choice","resposta":"Sim"}]' -F clickid='TESTE123'",
+"parametros_usados": "Multipart boundary automático do cURL; Origin header para simular CORS; campos UTM opcionais"
+},
+"metricas_performance": {
+"tempo_total": "Envio do formulário → resposta: ~200–600 ms sem upload; com upload PDF ~1–3 s (depende do tamanho e rede).",
+"volume_dados": "PDF até 10MB; payload JSON (skills/questionario) geralmente < 20KB.",
+"recursos_utilizados": "Gunicorn 3 workers; uso de memória ~250MB reportado; Nginx leve; BQ/GCS gerenciados."
+},
+"validacao_testes": {
+"como_testou": "cURL para preflight e POST; DevTools Network para CORS e postbacks iRev; journalctl para logs da API; ss -tlnp para portas.",
+"casos_teste": [
+"Envio sem CV",
+"Envio com CV válido",
+"Envio com PDF > 10MB (deve bloquear no front)",
+"Campos obrigatórios ausentes (deve bloquear Step 1/2/4)",
+"Questionário incompleto (bloquear e focar pergunta faltante no Step 5)",
+"Origin diferente (deve bloquear se Nginx não liberar)"
+],
+"resultados_esperados": "HTTP 200/JSON ok com ok:true; CORS liberado para https://caracol.media; postback de clique (goal 4) no CTA e de conversão (goal 11) ao exibir 'Obrigado'.",
+"edge_cases": "Queda de rede no fetch → front assume sucesso se status HTTP não disponível mas rede falhou (com log), para não frustrar; múltiplos listeners de submit → evitado com dataset.submitBound."
+},
+"arquivos_gerados": [
+{
+"nome": "documentacao-sistema-caracol.pdf",
+"localizacao": "/mnt/data/documentacao-sistema-caracol.pdf",
+"descricao": "Resumo técnico do sistema (arquitetura, fluxo, manutenção, postbacks).",
+"tamanho_aproximado": "≈100–300 KB"
+}
+],
+"decisoes": [
+{
+"topico": "CORS no Nginx em vez de Flask",
+"contexto_decisao": "Cabeçalhos apareciam duplicados causando bloqueio no browser.",
+"alternativas_consideradas": ["CORS via Flask", "CORS via Nginx"],
+"criterios_decisao": "Centralização no proxy, simplicidade e controle fino de preflight.",
+"impacto": "Eliminou duplicidade e estabilizou o preflight.",
+"risco_aceito": "Manter config sincronizada ao atualizar Nginx."
+},
+{
+"topico": "Evitar ACL por objeto no GCS (UBLA)",
+"contexto_decisao": "Erro 400 ao tentar obter ACL legacy.",
+"alternativas_consideradas": ["Desativar UBLA", "Ajustar código para não usar ACL por objeto"],
+"criterios_decisao": "Segurança e conformidade com UBLA.",
+"impacto": "Código mais simples; sem blob.acl.",
+"risco_aceito": "Necessidade de URL assinada se quiser acesso público temporário."
+},
+{
+"topico": "Postbacks client-side com fetch(..., keepalive)",
+"contexto_decisao": "Integração rápida sem alterar backend.",
+"alternativas_consideradas": ["Server-side postback", "Client-side beacon"],
+"criterios_decisao": "Tempo, simplicidade, independência do backend.",
+"impacto": "Medição funcionando de imediato.",
+"risco_aceito": "Adblockers podem suprimir; dedupe por localStorage para evitar duplicidade."
+}
+],
+"licoes_aprendidas": [
+"Nunca duplicar Access-Control-Allow-Origin: uma resposta, um header.",
+"Com UBLA no GCS, evite qualquer chamada de ACL por objeto.",
+"Links em GitHub Pages devem preservar caminhos relativos; não construir URLs com location.origin sem necessidade.",
+"No FormData, null vira string; envie apenas quando existir ou use string vazia.",
+"Manter um único listener de submit e bloquear Enter fora do último step evita envios acidentais.",
+"Checklist de campos front ↔ backend ↔ schema do BQ previne bugs de coluna vazia."
+],
+"comandos_uteis": [
+"sudo systemctl restart caracol-form",
+"sudo systemctl status caracol-form –no-pager",
+"sudo journalctl -u caracol-form -f",
+"sudo nginx -t && sudo systemctl reload nginx",
+"sudo ss -tlnp | grep -E ':443|:80'",
+"curl -i -X OPTIONS https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: Content-Type'",
+"curl -i -X POST https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -F nomePreferido='Teste' -F email='teste@caracol.media' -F cidadeEstado='SP' -F curso='ADM' -F ingles='Intermediário' -F trilha='Vendas & Marketing' -F questionario='[{"id":"q1","tipo":"single_choice","resposta":"Sim"}]'",
+"bq query –use_legacy_sql=false 'ALTER TABLE databasecaracol.recrutamento.candidatos_estagio ADD COLUMN IF NOT EXISTS clickid STRING'"
+],
+"referencias": [
+{
+"tipo": "documentacao",
+"titulo": "Google Cloud Storage — Uniform bucket-level access",
+"url": "https://cloud.google.com/storage/docs/uniform-bucket-level-access",
+"data_consulta": "2025-09-26",
+"relevancia": "Explica por que ACL por objeto não funciona sob UBLA."
+},
+{
+"tipo": "conversa",
+"com_quem": "Logs de sistema / navegador",
+"quando": "2025-09-26",
+"topicos": [
+"CORS duplicado",
+"Gunicorn status",
+"Erros GCS ACL",
+"Testes cURL e DevTools",
+"Postbacks iRev"
+]
+}
+],
+"proximos_passos": [
+{
+"item": "Mover postbacks para o servidor (server-to-server) com requests e timeouts",
+"prioridade": "média",
+"estimativa": "2–4 horas",
+"dependencias": "Adicionar requests no venv; atualizar app.py; logs e dedupe server-side"
+},
+{
+"item": "Gerar URL assinada para o CV (tempo limitado) e armazenar no BQ",
+"prioridade": "baixa",
+"estimativa": "1–2 horas",
+"dependencias": "Chaves de serviço com permissões; lib google-cloud-storage"
+},
+{
+"item": "Adicionar testes automatizados de schema (CI) para o BQ",
+"prioridade": "baixa",
+"estimativa": "3–5 horas",
+"dependencias": "Especificação de schema, small scripts de validação"
+}
+],
+"troubleshooting_futuro": {
+"problemas_possiveis": [
+"CORS volta a falhar se outra regra duplicar Access-Control-Allow-Origin",
+"Uploads > 10MB falham no front (intencional); ajustar limite se necessário",
+"Postbacks client-side bloqueados por AdBlock; considerar server-side",
+"Colunas novas no front quebram inserts se não existirem no BQ"
+],
+"como_debugar": "1) journalctl -u caracol-form -f (erros do Flask/Gunicorn) 2) nginx -t e /var/log/nginx/error.log 3) DevTools → Network (CORS, preflight, postbacks) 4) curl -i -X OPTIONS para validar CORS 5) bq query para conferir colunas/linhas no BQ.",
+"logs_importantes": "/var/log/nginx/error.log; /var/log/nginx/access.log; journalctl -u caracol-form."
+},
+"comentarios": "BigQuery alvo: databasecaracol.recrutamento.candidatos_estagio (conforme confirmado). SO da VM presumido Ubuntu 22.04 LTS [CONFIRMAR]. Recomenda-se documentar o schema final do BQ (todos os campos) e travar um contrato de payload entre front e backend para evitar falhas futuras."
+}

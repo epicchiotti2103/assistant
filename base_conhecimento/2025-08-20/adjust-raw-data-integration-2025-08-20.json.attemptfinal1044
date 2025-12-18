@@ -1,0 +1,18 @@
+{
+  "id": "adjust-raw-data-integration-2025-08-20",
+  "data": "2025-08-20",
+  "autor": "Elio",
+  "projeto": "Adjust Raw Data Integration",
+  "tipo": "implementacao",
+  "contexto": "Organizar e disponibilizar dados brutos exportados pelo Adjust (via GCS) em uma tabela BigQuery para análises e cruzamento com dados de campanha. Stakeholders: equipe de BI e mobile marketing. Prazo: até fim do mês.",
+  "descricao": "Configuração de exportação raw data do Adjust para GCS, validação de permissões, teste de conectividade e criação de tabela externa no BigQuery usando padrões de URI.",
+  "passos": [
+    {
+      "etapa": "Configurar Raw Data Export no dashboard Adjust",
+      "motivo": "Obter arquivos CSV/GZIP com adjust_id em um bucket GCS",
+      "alternativas": [
+        "Usar API de relatórios (descartada: não retorna adjust_id)",
+        "SDK callback no app (descartada: exige mudança no client-side)",
+        "Raw Data Export (usada: método oficial, inclui adjust_id)",],
+      "codigo_detalhado": null,
+      "comandos_executados": []

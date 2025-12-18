@@ -2,16 +2,11 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-def _default_db_url() -> str:
-    # Dentro do container, persistimos o sqlite em /app/data/app.db
-    # (docker-compose mapeia ./data -> /app/data)
-    return "sqlite:////app/data/app.db"
-
-DB_URL = os.getenv("DB_URL", _default_db_url())
+DB_URL = os.getenv("DB_URL", "postgresql+psycopg://assistant:assistant@db:5432/assistant")
 
 engine = create_engine(
     DB_URL,
-    connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {},
+    pool_pre_ping=True,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

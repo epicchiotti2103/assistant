@@ -1,0 +1,272 @@
+{
+  "id": "analise_installs-2025-08-19",
+  "data": "2025-08-19",
+  "autor": "Elio",
+  "projeto": "Análise de Instalações Mobile (D0–D14)",
+  "tipo": "implementacao",
+  "contexto": "Projeto para analisar dados de instalações de aplicativos mobile (Android/iOS) com base em CSV exportado do agregador. O objetivo é gerar métricas de risco por PID+Plataforma, identificar comportamentos suspeitos (spikes, instabilidade, outliers, CTIT irregular), consolidar resultados em CSV, XLSX (com formatação condicional) e PDF (resumo executivo). Stakeholders: time de growth/fraude. Prazo: ASAP para detectar anomalias em mídia.",
+  "descricao": "Implementação de pipeline em Python que lê dados brutos de instalações, agrega por dia relativo ao primeiro evento por plataforma (D0–D14), calcula métricas de qualidade (CTIT, CV, outliers, spikes), classifica risco, exporta em CSV, XLSX e PDF. Foram enfrentados diversos problemas de importação, cálculos e formatações, que foram resolvidos com ajustes no código e instalação correta de dependências.",
+  "passos": [
+    {
+      "etapa": "Leitura do raw data",
+      "motivo": "Precisamos de dados brutos para calcular CTIT, volumes e métricas por PID e Plataforma.",
+      "alternativas": [
+        "Usar planilha XLSX direto – descartado porque os arquivos eram grandes e mais lentos.",
+        "Usar banco de dados – descartado pela urgência.",
+        "Usar CSV com pandas – escolhido pela simplicidade e velocidade."
+      ],
+      "codigo_detalhado": "df = pd.read_csv('./agregados/aggregated_installs.csv', parse_dates=['Attributed Touch Time','Install Time'])",
+      "comandos_executados": [
+        "python analise_installs.py"
+      ],
+      "resultados": "DtypeWarning: Columns (39,40,49,59,62,63,64) have mixed types...",
+      "tempo_execucao": "1-2 segundos para carregar ~200MB",
+      "problemas_enfrentados": [
+        {
+          "erro": "DtypeWarning em algumas colunas",
+          "descoberta": "pandas tentava misturar string e número",
+          "tentativas": [
+            "Ignorar warning – funcionou, mas gerava ruído",
+            "Especificar dtype – trabalhoso",
+            "Usar low_memory=False – resolveu de forma simples"
+          ],
+          "solucao_final": "Mantivemos parse_dates e low_memory=False quando necessário",
+          "tempo_perdido": "10 minutos",
+          "como_evitar": "Sempre revisar schema das colunas ou setar dtype"
+        }
+      ]
+    },
+    {
+      "etapa": "Cálculo do CTIT e flag de suspeito",
+      "motivo": "Avaliar fraude com base em tempo do clique até instalação",
+      "alternativas": [
+        "Usar limiar fixo (10s–24h) – escolhido",
+        "Modelar distribuição CTIT – descartado por complexidade"
+      ],
+      "codigo_detalhado": "df_install['CTIT_sec'] = (df_install['Install Time'] - df_install['Attributed Touch Time']).dt.total_seconds()",
+      "comandos_executados": [],
+      "resultados": "Coluna CTIT_sec criada e classificada em SUSPEITO/NORMAL",
+      "tempo_execucao": "1 segundo",
+      "problemas_enfrentados": []
+    },
+    {
+      "etapa": "Cálculo de D0–D14 por plataforma",
+      "motivo": "Precisávamos normalizar a linha do tempo por plataforma, já que PID pode aparecer em datas diferentes em iOS e Android",
+      "alternativas": [
+        "Usar primeiro dia global – gerava erro de offset entre plataformas",
+        "Usar primeiro dia por plataforma – escolhido e implementado"
+      ],
+      "codigo_detalhado": "first_inst = df_install.groupby(['PID','Platform'])['install_date'].min().rename('first_date')\n df_install = df_install.join(first_inst,on=['PID','Platform'])\n df_install['day_offset'] = (df_install['install_date'] - df_install['first_date']).dt.days",
+      "comandos_executados": [],
+      "resultados": "Agora iOS e Android do mesmo PID começam ambos em D0",
+      "tempo_execucao": "2 segundos",
+      "problemas_enfrentados": []
+    },
+    {
+      "etapa": "Cálculo de spikes internos",
+      "motivo": "Detectar picos anormais que podem indicar fraude ou burst artificial",
+      "alternativas": [
+        "Comparar só D2 vs média de D0-D1 – descartado, gerava falsos positivos",
+        "Comparar cada dia com média móvel de 7 dias + z-score – escolhido",
+        "Modelos de série temporal – descartado pela urgência"
+      ],
+      "codigo_detalhado": "if yt >= 2 * media_movel and zscore > 2: spike",
+      "comandos_executados": [],
+      "resultados": "Casos como PID=beaverspq03_int (iOS) com salto em D3→D4 foram sinalizados",
+      "tempo_execucao": "1 segundo",
+      "problemas_enfrentados": []
+    },
+    {
+      "etapa": "Outliers por dia e total",
+      "motivo": "Comparar PID com a média dos demais na mesma plataforma",
+      "alternativas": [
+        "Global cross-platform – descartado",
+        "Separar por plataforma – escolhido",
+        "Quantis em vez de média±DP – considerado mas DP foi suficiente"
+      ],
+      "codigo_detalhado": "np.where(abs(x - media) > 1.5 * std, 'OUTLIER', 'NORMAL')",
+      "comandos_executados": [],
+      "resultados": "Outliers D0–D14 calculados, respeitando NaN",
+      "tempo_execucao": "2 segundos",
+      "problemas_enfrentados": [
+        {
+          "erro": "numpy.exceptions.DTypePromotionError",
+          "descoberta": "mistura de string ('NORMAL') e float (nan)",
+          "tentativas": [
+            "usar np.where – deu erro",
+            "forçar dtype object – funcionou"
+          ],
+          "solucao_final": "Ajuste do np.where para devolver np.nan em vez de float",
+          "tempo_perdido": "15 minutos",
+          "como_evitar": "Testar np.where com misto str/nan sempre como object"
+        }
+      ]
+    },
+    {
+      "etapa": "Exportação XLSX com formatação",
+      "motivo": "Facilitar leitura com cores",
+      "alternativas": [
+        "Usar apenas CSV – descartado, sem formatação",
+        "Usar openpyxl – escolhido"
+      ],
+      "codigo_detalhado": "linha em amarelo quando risk_level==MÉDIO_RISCO; vermelho quando ALTO_RISCO",
+      "comandos_executados": [],
+      "resultados": "Arquivo indicadores_completos_d0_d14.xlsx salvo com cores",
+      "tempo_execucao": "3 segundos",
+      "problemas_enfrentados": []
+    },
+    {
+      "etapa": "Geração de PDF resumo",
+      "motivo": "Criar documento executivo para stakeholders",
+      "alternativas": [
+        "Somente XLSX – descartado, pouco legível",
+        "PDF manual no Word – descartado, pouco escalável",
+        "reportlab + matplotlib – escolhido"
+      ],
+      "codigo_detalhado": "SimpleDocTemplate + tabelas + gráficos matplotlib convertidos em imagem",
+      "comandos_executados": [
+        "/Users/elio/Documents/analise_ton_v2/venv/bin/python -m pip install reportlab matplotlib pillow"
+      ],
+      "resultados": "Erro inicial: No module named 'reportlab' → corrigido instalando no venv correto",
+      "tempo_execucao": "20 segundos (incluindo geração dos gráficos)",
+      "problemas_enfrentados": [
+        {
+          "erro": "KeyError: Style 'Bullet' already defined",
+          "descoberta": "reportlab já tinha estilo Bullet",
+          "tentativas": [
+            "manter Bullet – erro",
+            "renomear para BulletSmall – funcionou"
+          ],
+          "solucao_final": "Renomeado estilo para BulletSmall",
+          "tempo_perdido": "10 minutos",
+          "como_evitar": "Evitar sobrescrever estilos padrão do reportlab"
+        }
+      ]
+    }
+  ],
+  "ambiente_tecnico": {
+    "linguagem": "Python",
+    "versao": "3.13",
+    "dependencias": [
+      "pandas==2.2.2",
+      "numpy==2.0.1",
+      "openpyxl==3.1.5",
+      "reportlab==4.4.3",
+      "matplotlib==3.9.2",
+      "pillow==11.3.0"
+    ],
+    "configuracoes_ambiente": [
+      "macOS (Apple Silicon) – versão [CONFIRMAR]",
+      "venv localizado em /Users/elio/Documents/analise_ton_v2/venv",
+      "PYTHONPATH padrão"
+    ],
+    "estrutura_arquivos": "analise_installs.py, aggregate_raw_data.py, pasta agregados/, saídas indicadores_completos_d0_d14.csv, .xlsx, .pdf"
+  },
+  "exemplos_reais": {
+    "input_exemplo": "raw CSV aggregated_installs.csv com colunas Attributed Touch Time, Install Time, Event Name, Media Source",
+    "output_amostra": "PID,Platform,D0,...,D14,total_vol,% Suspeito,Coef. Variacao,spike_internal,outlier_D0...D14,total_alerts,risk_level",
+    "comando_execucao": "/Users/elio/Documents/analise_ton_v2/venv/bin/python analise_installs.py",
+    "parametros_usados": "nenhum parâmetro, caminhos fixos em ./agregados/"
+  },
+  "metricas_performance": {
+    "tempo_total": "30-40 segundos incluindo leitura, cálculos, exportações e PDF",
+    "volume_dados": "CSV ~200MB",
+    "recursos_utilizados": "CPU <30%, RAM ~1.5GB, disco alguns MB para saídas"
+  },
+  "validacao_testes": {
+    "como_testou": "Executando com CSV real, comparando manualmente volumes e outputs",
+    "casos_teste": [
+      "PID aparecendo só em iOS e só depois em Android",
+      "PID com spike real (ex: beaverspq03_int iOS)",
+      "PID sem spike mas instável"
+    ],
+    "resultados_esperados": "Spikes detectados corretamente, instabilidade alta em casos oscilantes",
+    "edge_cases": "PIDs com poucos dias (<3), volumes nulos, % Suspeito = 0%"
+  },
+  "arquivos_gerados": [
+    {
+      "nome": "indicadores_completos_d0_d14.csv",
+      "localizacao": "pasta raiz",
+      "descricao": "Tabela completa com todos indicadores",
+      "tamanho_aproximado": "2-3MB"
+    },
+    {
+      "nome": "indicadores_completos_d0_d14.xlsx",
+      "localizacao": "pasta raiz",
+      "descricao": "Versão Excel com formatação condicional de risco",
+      "tamanho_aproximado": "3-5MB"
+    },
+    {
+      "nome": "indicadores_resumo.pdf",
+      "localizacao": "pasta raiz",
+      "descricao": "Resumo executivo com KPIs, hotlist e gráficos",
+      "tamanho_aproximado": "500KB-1MB"
+    }
+  ],
+  "decisoes": [
+    {
+      "topico": "Usar primeiro dia por plataforma para D0",
+      "contexto_decisao": "PID aparecia em Android e só depois em iOS",
+      "alternativas_consideradas": ["Primeiro dia global", "Primeiro dia por plataforma"],
+      "criterios_decisao": "Correção de alinhamento temporal",
+      "impacto": "Dados de iOS não mais deslocados em D5 etc",
+      "risco_aceito": "Complexidade maior no groupby"
+    }
+  ],
+  "licoes_aprendidas": [
+    "Sempre instalar libs no mesmo venv que roda o script",
+    "Evitar sobrescrever estilos padrão do reportlab",
+    "Coef. Variação capta quedas e subidas; spike interno capta só subidas",
+    "Separar por plataforma é essencial para PIDs cross-platform"
+  ],
+  "comandos_uteis": [
+    "/Users/elio/Documents/analise_ton_v2/venv/bin/python -m pip install reportlab matplotlib pillow",
+    "/Users/elio/Documents/analise_ton_v2/venv/bin/python analise_installs.py",
+    "source /Users/elio/Documents/analise_ton_v2/venv/bin/activate",
+    "pip install --upgrade pip"
+  ],
+  "referencias": [
+    {
+      "tipo": "documentacao",
+      "titulo": "pandas.read_csv",
+      "url": "https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html",
+      "data_consulta": "2025-08-18",
+      "relevancia": "uso de parse_dates e low_memory"
+    },
+    {
+      "tipo": "conversa",
+      "com_quem": "ChatGPT",
+      "quando": "2025-08-15 a 2025-08-19",
+      "topicos": [
+        "Ajuste de spikes",
+        "Exportação PDF",
+        "Instalação de dependências no venv correto",
+        "Formatação XLSX"
+      ]
+    }
+  ],
+  "proximos_passos": [
+    {
+      "item": "Adicionar spike negativo (quedas abruptas)",
+      "prioridade": "média",
+      "estimativa": "1h",
+      "dependencias": "ajustar lógica de spike_internal"
+    },
+    {
+      "item": "Automatizar execução diária",
+      "prioridade": "alta",
+      "estimativa": "2h",
+      "dependencias": "agendamento via cron ou Airflow"
+    }
+  ],
+  "troubleshooting_futuro": {
+    "problemas_possiveis": [
+      "ImportError se libs não instaladas no venv correto",
+      "Erro de dtype se CSV mudar schema",
+      "Estouro de memória se CSV crescer muito"
+    ],
+    "como_debugar": "Checar sys.executable para ver venv correto, printar dtypes das colunas, monitorar uso de RAM",
+    "logs_importantes": "stdout do script, mensagens de pandas e tracebacks de exceção"
+  },
+  "comentarios": "O pipeline está funcional mas pode ser refinado para suportar volumes maiores e spikes negativos. O PDF já atende bem para resumo executivo."
+}

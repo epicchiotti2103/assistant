@@ -1,0 +1,199 @@
+{
+  "id": "blocked-activation-report-2025-08-18",
+  "data": "2025-08-18",
+  "autor": "Elio Picchiotti",
+  "projeto": "Relatório de Blocked Activation (AppsFlyer) – TON",
+  "tipo": "implementacao",
+  "contexto": "Construir um pipeline local (Python) para processar os relatórios raw de 'blocked-in-app-events' do AppsFlyer (Android: br.com.stone.ton; iOS: id1496404455) e gerar um Excel padronizado com 6 abas de agregações do evento de ativação 'af_tapton_activation_once'. Objetivo: acelerar análises operacionais da agência junto ao cliente (TON/Stone), garantindo consistência entre plataformas, ordenação previsível e planilha pronta para uso. Restrições: arquivos exportados pelo AppsFlyer variam poucos detalhes de cabeçalho; volume moderado (6 arquivos por rodada, mas escalável); timezone America/Sao_Paulo; nomes de colunas devem ser respeitados (ex.: 'Media Source', 'Site ID', 'Event Time', 'Event Name').",
+  "descricao": "Implementado script 'blocked_activation_report.py' que lê todos os arquivos com '*blocked-in-app-events*' na pasta 'analise_ton/raw_data', filtra 'Event Name == af_tapton_activation_once', deriva 'event_date' a partir de 'Event Time' e gera 6 agregações: (1) event_date x Platform; (2) event_date x Platform x Media Source; (3) event_date x Platform x Media Source x Site ID; e equivalentes sem data (A/B/C). O Excel final aplica AutoFilter, largura automática de colunas e ordenação estável priorizando 'event_date' (quando existir), 'Media Source' (quando existir) e, por último, 'total_blocked_activation' (desc). Métrica renomeada explicitamente para 'total_blocked_activation' por se tratar de um raw de 'blocked'.",
+  "passos": [
+    {
+      "etapa": "Definir estrutura de pastas e isolamento do ambiente",
+      "motivo": "Padronizar local de execução e garantir reprodutibilidade (venv separado evita conflitos de dependências).",
+      "alternativas": [
+        "Executar no Python global (não usado: risco de conflitos de versões e pacotes).",
+        "Docker (não usado por simplicidade inicial e overhead para este escopo)."
+      ],
+      "codigo_detalhado": "Estrutura proposta:\nanalise_ton/\n  ├─ venv/                # ambiente virtual\n  ├─ raw_data/            # dumps do AppsFlyer\n  └─ blocked_activation_report.py\n\nCriação do venv e deps:\npython -m venv venv\nsource venv/bin/activate   # macOS/Linux\n# .\\\\venv\\\\Scripts\\\\activate  # Windows\npip install \"pandas==2.2.2\" \"openpyxl==3.1.5\" \"python-dateutil==2.9.0.post0\"",
+      "resultados": "Ambiente isolado criado em 2025-08-18; pasta 'raw_data' contendo 6 arquivos: 3 iniciando com 'br.com.stone.ton_*' e 3 com 'id1496404455_*'. Exemplo de nomes: 'br.com.stone.ton_blocked-in-app-events_2025-08-01_2025-08-13_America_Sao_Paulo.csv' e 'id1496404455_blocked-in-app-events_2025-08-01_2025-08-14_America_Sao_Paulo.csv'.",
+      "problemas_enfrentados": [
+        {
+          "erro": "Possível variação de extensão/encoding (.csv com BOM, latin-1, separadores alternativos).",
+          "descoberta": "Exportações do AppsFlyer podem vir com vírgula, tab, ou ; dependendo de local/planilha.",
+          "tentativas": [
+            "Ler como UTF-8 com separador ','.",
+            "Fallback para '\\t' e ';'.",
+            "Fallback de encoding para latin-1."
+          ],
+          "solucao_final": "Função de leitura robusta com múltiplas tentativas de separador e encoding; aborta com erro claro se falhar."
+        }
+      ]
+    },
+    {
+      "etapa": "Leitura robusta e checagem de colunas necessárias",
+      "motivo": "Garantir que as colunas mínimas existam para processar agregações sem travar o pipeline.",
+      "alternativas": [
+        "Abortar se faltar coluna (não usado: interromperia análise quando houver pequenas variações).",
+        "Mapear colunas para nomes canônicos (não usado nesta fase para manter exatamente os cabeçalhos originais do AppsFlyer)."
+      ],
+      "codigo_detalhado": "NEEDED_COLS = [\"Event Time\", \"Event Name\", \"Platform\", \"Media Source\", \"Site ID\"]\nPara cada arquivo lido, se alguma destas não existir, a coluna é criada vazia (pd.NA).",
+      "resultados": "6 arquivos lidos; garantido o superset das colunas alvo para as agregações.",
+      "problemas_enfrentados": [
+        {
+          "erro": "Falta pontual de 'Site ID' em algum arquivo (teórico).",
+          "descoberta": "Algumas fontes podem não ter SubPub.",
+          "tentativas": ["Forçar presença da coluna com pd.NA e seguir."],
+          "solucao_final": "Preencher coluna ausente com NA permite agrupar sem falhar; aparece como '(blank)' após normalização para ordenação se necessário."
+        }
+      ]
+    },
+    {
+      "etapa": "Normalizar datas e derivar 'event_date'",
+      "motivo": "Agrupamentos devem considerar a data do evento (e não de instalação), conforme decisão do solicitante.",
+      "alternativas": [
+        "Usar 'Install Time' para cortes temporais (descartado por orientação do solicitante).",
+        "Usar timezone do filename (descartado: 'Event Time' já vem pronto; derivamos somente a data)."
+      ],
+      "codigo_detalhado": "df['Event Time'] = pd.to_datetime(df['Event Time'], errors='coerce')\ndf['event_date'] = df['Event Time'].dt.date\n# Normalização básica da Platform (evitar vazios)\ndf['Platform'] = df.get('Platform', pd.NA).fillna('unknown').replace({'': 'unknown'})",
+      "resultados": "Coluna 'event_date' criada com valores como '2025-08-01', '2025-08-02', etc.",
+      "problemas_enfrentados": [
+        {
+          "erro": "Linhas com 'Event Time' inválido/nulo.",
+          "descoberta": "Conversão com errors='coerce' resulta em NaT.",
+          "tentativas": ["Manter NaT e, ao agrupar por 'event_date', tais linhas não atrapalham/ficam fora."],
+          "solucao_final": "Coerção segura; linhas sem data permanecem no raw mas não são agregadas por 'event_date'."
+        }
+      ]
+    },
+    {
+      "etapa": "Filtrar evento alvo 'af_tapton_activation_once'",
+      "motivo": "O relatório solicitado é especificamente sobre ativações bloqueadas do evento de tap/ton (nome padronizado informado).",
+      "alternativas": [
+        "Parametrizar o nome do evento por CLI (adiável; manter fixo por simplicidade inicial).",
+        "Selecionar múltiplos eventos (fora de escopo nesta entrega)."
+      ],
+      "codigo_detalhado": "TARGET_EVENT = 'af_tapton_activation_once'\ndf_filt = df[df['Event Name'] == TARGET_EVENT].copy()",
+      "resultados": "Somente linhas do evento alvo permanecem para agregação.",
+      "problemas_enfrentados": [
+        {
+          "erro": "Risco de variação sutil no nome do evento (typo).",
+          "descoberta": "Nome foi confirmado no chat pelo solicitante.",
+          "tentativas": ["Considerar match case-insensitive (adiável)."],
+          "solucao_final": "Match exato por ora; se houver divergência real futura, expor parâmetro '--event-name'."
+        }
+      ]
+    },
+    {
+      "etapa": "Agregações (groupby) e nomenclatura da métrica",
+      "motivo": "Produzir as 6 visões solicitadas, com métrica coerente com a natureza do raw (bloqueios).",
+      "alternativas": [
+        "Contar via 'Event Revenue' > 0 (não faz sentido aqui, o objetivo é volume de eventos bloqueados).",
+        "Pivot tables no Excel (não usado: preferimos gerar pronto e estável em código)."
+      ],
+      "codigo_detalhado": "def grouped_counts(df_filt, dims):\n    return (\n        df_filt\n        .groupby(dims, dropna=False)\n        .size()\n        .reset_index(name='total_blocked_activation')\n    )\n\n# Com data:\nout1 = grouped_counts(df_filt, [\"event_date\", \"Platform\"])  # 01_event_platform\nout2 = grouped_counts(df_filt, [\"event_date\", \"Platform\", \"Media Source\"])  # 02_event_plat_ms\nout3 = grouped_counts(df_filt, [\"event_date\", \"Platform\", \"Media Source\", \"Site ID\"])  # 03_event_plat_ms_site\n# Sem data:\noutA = grouped_counts(df_filt, [\"Platform\"])  # A_no_date_platform\noutB = grouped_counts(df_filt, [\"Platform\", \"Media Source\"])  # B_no_date_plat_ms\noutC = grouped_counts(df_filt, [\"Platform\", \"Media Source\", \"Site ID\"])  # C_no_date_plat_ms_site",
+      "resultados": "6 DataFrames agregados com a coluna 'total_blocked_activation'. Exemplo (02_event_plat_ms):\n\nevent_date,Platform,Media Source,total_blocked_activation\n2025-08-01,android,mediaA,124\n2025-08-01,ios,mediaB,31\n2025-08-02,android,mediaA,76",
+      "problemas_enfrentados": [
+        {
+          "erro": "Necessidade de renomear a métrica para refletir que são eventos 'blocked'.",
+          "descoberta": "Solicitante pediu trocar 'total_activation_events' por 'total_blocked_activation'.",
+          "tentativas": ["Padronizar no groupby via 'name' do reset_index()."],
+          "solucao_final": "A métrica passou a se chamar 'total_blocked_activation' em todas as abas."
+        }
+      ]
+    },
+    {
+      "etapa": "Ordenação e consistência de exibição",
+      "motivo": "Melhor leitura: datas crescentes, fontes (Media Source) ordenadas e totais em ordem descendente.",
+      "alternativas": [
+        "Ordenar apenas pelo total (desc) (descartado: perde legibilidade por data).",
+        "Ordenar apenas por data (descartado: dificulta comparar fontes)."
+      ],
+      "codigo_detalhado": "Regra simples e estável por aba:\n- Abas com 'event_date': ordenar por ['event_date'(asc), 'Media Source'(asc, se existir), 'Platform'(asc, se fizer sentido), 'Site ID'(asc, se existir), 'total_blocked_activation'(desc)].\n- Abas sem data: ordenar por ['Media Source'(asc, se existir), 'Platform'(asc), 'Site ID'(asc), 'total_blocked_activation'(desc)].\n\nImplementação compacta:\n\ndef _sort_df(df):\n    cols, asc = [], []\n    if 'event_date' in df.columns: cols += ['event_date']; asc += [True]\n    if 'Media Source' in df.columns: cols += ['Media Source']; asc += [True]\n    if 'Platform' in df.columns: cols += ['Platform']; asc += [True]\n    if 'Site ID' in df.columns: cols += ['Site ID']; asc += [True]\n    cols += ['total_blocked_activation']; asc += [False]\n    return df.sort_values(cols, ascending=asc)",
+      "resultados": "Planilhas exibem blocos por data e, dentro delas, fontes organizadas alfabeticamente; totais descem naturalmente por relevância.",
+      "problemas_enfrentados": [
+        {
+          "erro": "Percepção de que abas 02/B/03/C não estavam ordenando.",
+          "descoberta": "Critério não incluía 'Media Source' em todos os casos inicialmente.",
+          "tentativas": [
+            "Criar regras específicas por aba (excessivo).",
+            "Solução mínima: incluir 'Media Source' no sort quando presente."
+          ],
+          "solucao_final": "Função de ordenação genérica que adiciona 'Media Source' e 'Site ID' quando disponíveis, mantendo a ordem das abas original."
+        }
+      ]
+    },
+    {
+      "etapa": "Exportar Excel com AutoFilter e largura automática",
+      "motivo": "Facilitar uso direto pelo time (filtros ativos e colunas legíveis sem ajuste manual).",
+      "alternativas": [
+        "xlsxwriter (não usado: openpyxl já atende e permite manipular dimensões/filtro após escrita).",
+        "Gerar CSVs separados (não usado: preferimos 1 arquivo .xlsx consolidado)."
+      ],
+      "codigo_detalhado": "with pd.ExcelWriter(OUT_XLSX, engine='openpyxl') as writer:\n    for name, df_out in sheets_in_order:\n        df_sorted = _sort_df(df_out.copy())\n        df_sorted.to_excel(writer, sheet_name=name, index=False)\n        _apply_autofilter_and_autowidth(writer, name, df_sorted)\n\n# Função auxiliar (openpyxl):\nfrom openpyxl.utils import get_column_letter\n\ndef _apply_autofilter_and_autowidth(writer, sheet_name, df):\n    ws = writer.sheets[sheet_name]\n    if df.shape[1] > 0:\n        last_col = get_column_letter(df.shape[1])\n        last_row = df.shape[0] + 1\n        ws.auto_filter.ref = f\"A1:{last_col}{last_row}\"\n    for i, col in enumerate(df.columns, start=1):\n        header_len = len(str(col))\n        max_cell_len = 0\n        if df.shape[0] > 0:\n            max_cell_len = int(df[col].map(lambda x: len(str(x)) if pd.notna(x) else 0).max())\n        width = max(header_len, max_cell_len) + 2\n        width = max(12, min(60, width))\n        ws.column_dimensions[get_column_letter(i)].width = width",
+      "resultados": "Arquivo final 'resultado_blocked_activation.xlsx' com 6 abas em ordem: 01_event_platform, A_no_date_platform, 02_event_plat_ms, B_no_date_plat_ms, 03_event_plat_ms_site, C_no_date_plat_ms_site. Todas com filtros ativos e larguras ajustadas.",
+      "problemas_enfrentados": [
+        {
+          "erro": "Colunas muito largas por valores outliers (URLs longas).",
+          "descoberta": "Sem limite, algumas colunas podem ultrapassar largura confortável.",
+          "tentativas": ["Definir teto de 60 caracteres."],
+          "solucao_final": "Largura = clamp(12..60) com margem de 2."
+        }
+      ]
+    }
+  ],
+  "ambiente_tecnico": {
+    "linguagem": "Python",
+    "versao": "3.11.x (recomendado); compatível com 3.10",
+    "dependencias": [
+      "pandas==2.2.2",
+      "openpyxl==3.1.5",
+      "python-dateutil==2.9.0.post0"
+    ],
+    "configuracoes_ambiente": [
+      "Sistema: macOS 15.6 (arm64) (ambiente do autor)",
+      "Fuso: America/Sao_Paulo",
+      "Estrutura: analise_ton/venv, analise_ton/raw_data, analise_ton/blocked_activation_report.py",
+      "Entrada: arquivos CSV do AppsFlyer contendo 'blocked-in-app-events'"
+    ]
+  },
+  "decisoes": [
+    {
+      "topico": "Usar apenas 'event_date' (derivada de 'Event Time')",
+      "contexto_decisao": "Solicitante preferiu análises por data de evento; 'Install Time' removido do escopo.",
+      "impacto": "Torna as visões focadas no comportamento do evento; evita ambiguidade de janelas de instalação."
+    },
+    {
+      "topico": "Métrica 'total_blocked_activation'",
+      "contexto_decisao": "Coerência com a origem do raw (blocked-in-app-events).",
+      "impacto": "Evita confusão com eventos não bloqueados; facilita leitura para fraudes/bloqueios."
+    },
+    {
+      "topico": "Ordenação incluindo 'Media Source'",
+      "contexto_decisao": "Abas com fonte precisam ser legíveis por mídia.",
+      "impacto": "Comparação entre fontes melhora; inspeção por mídia fica natural."
+    },
+    {
+      "topico": "AutoFilter + AutoWidth",
+      "contexto_decisao": "Planilha deve estar pronta para filtragem imediata.",
+      "impacto": "Economiza tempo e reduz erros operacionais."
+    }
+  ],
+  "documentacao_extra": [
+    "AppsFlyer Help Center – Raw Data: Blocked in-app events (consultado em 2025-08-18)",
+    "Arquivos de entrada: br.com.stone.ton_blocked-in-app-events_2025-08-01_2025-08-13_America_Sao_Paulo.csv",
+    "Arquivos de entrada: id1496404455_blocked-in-app-events_2025-08-01_2025-08-14_America_Sao_Paulo.csv",
+    "Conversa interna (2025-08-18): decisões sobre remover install_date, renomear métrica e ordenar por Media Source",
+    "Autores/Contribuições: Fabio Pichioti (owner); Assistente GPT-5 Thinking (apoio técnico)"
+  ],
+  "proximos_passos": [
+    "Adicionar parâmetro CLI '--event-name' para flexibilizar o filtro sem editar código.",
+    "Incluir coluna 'Blocked Reason' / 'Blocked Sub Reason' em novas abas diagnósticas (top motivos por mídia).",
+    "Adicionar checagens de sanidade: alerta se o evento alvo não aparecer em algum arquivo.",
+    "Implementar logs estruturados (logging) e testes unitários básicos (pytest) para funções de leitura e ordenação.",
+    "Suporte a volumes maiores com chunksize e/ou Polars/pyarrow ao detectar arquivos > 1M linhas.",
+    "Exportar também CSVs por aba (opcional) e planilha com um sumário executivo (tabela dinâmica de top 10).",
+    "Parametrizar limites de largura de coluna e desabilitar AutoFilter via flags.",
+    "Versão 2: integrar outras famílias de raw (installs, in-app-events) para comparar bloqueado vs permitido."
+  ],
+  "comentarios": "Atenção a variações de cabeçalho (ex.: 'Media Source' vs 'media_source' em outros dumps); este relatório assume os nomes exatamente como exportados em 'blocked-in-app-events'. Se houver arquivos enormes, preferir execução em máquina com memória adequada ou alternar para leitura em pedaços. Confirmar com o cliente o nome oficial do evento ('af_tapton_activation_once') para evitar ausência de dados por divergência tipográfica. Para auditoria, manter 10 linhas de amostra (aba DEBUG) facilita reproduzir casos."
+}

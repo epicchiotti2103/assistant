@@ -1,0 +1,232 @@
+{
+  "meta": {
+    "project": "Personal Assistant (API + Knowledge + Agenda + Radar + Chat + (future) Projects layer)",
+    "date_local": "2025-12-18",
+    "timezone": "America/Sao_Paulo",
+    "prepared_for": "Handoff to colleague to continue implementation/debugging",
+    "repo_context": "FastAPI service in Docker Compose; Postgres+pgvector for embeddings; local JSON knowledge folder mounted into container"
+  },
+  "current_architecture": {
+    "services": [
+      {
+        "name": "api",
+        "image": "assistant-api (built from Dockerfile)",
+        "ports": [
+          "8000:8000"
+        ],
+        "notes": [
+          "Runs uvicorn app.main:app with --reload inside container.",
+          "Uses SQLAlchemy + psycopg (Postgres) and pgvector (SQLAlchemy Vector type).",
+          "Has endpoints for /health, /tasks, /radar, /agenda/overview, /knowledge/*, /chat/*."
+        ]
+      },
+      {
+        "name": "db",
+        "image": "pgvector/pgvector:pg16",
+        "ports": [
+          "5432:5432"
+        ],
+        "notes": [
+          "Extension vector is installed/available; CREATE EXTENSION IF NOT EXISTS vector ran successfully."
+        ]
+      }
+    ],
+    "storage": [
+      {
+        "name": "base_conhecimento",
+        "path_in_container": "/app/base_conhecimento",
+        "notes": [
+          "JSON files organized by date folders (YYYY-MM-DD).",
+          "sync_local endpoint scans these and inserts/updates DB rows."
+        ]
+      }
+    ],
+    "env_and_secrets": {
+      "guidance": [
+        "Do NOT delete existing .env keys (e.g., DeepSeek); instead, add new variables for Postgres + OpenAI.",
+        "If you create a new .env.example, keep .env as the user’s local secrets file."
+      ],
+      "expected_variables": [
+        "DATABASE_URL=postgresql+psycopg://assistant:assistant@db:5432/assistant",
+        "OPENAI_API_KEY=...",
+        "USER_ID=default (optional; otherwise code defaults to 'default')",
+        "KNOWLEDGE_DIR=/app/base_conhecimento (optional if hardcoded)"
+      ]
+    }
+  },
+  "what_was_done": [
+    "Docker Compose now includes a Postgres (pgvector) container and the API container.",
+    "psycopg[binary] and pgvector Python packages were installed and import successfully inside the container (psycopg 3.2.3; pgvector.sqlalchemy.Vector import OK).",
+    "Database extension `vector` is enabled in Postgres (CREATE EXTENSION IF NOT EXISTS vector).",
+    "FastAPI is serving /health successfully and openapi.json shows endpoints including /chat/preview and /chat/respond."
+  ],
+  "observed_problems_and_errors": [
+    {
+      "area": "API runtime / imports",
+      "symptoms": [
+        "Intermittent crashes and reload loops from import errors (e.g., missing requests, missing pgvector, bad models.py syntax).",
+        "At one point: SyntaxError: `from __future__ import annotations` not at top of file.",
+        "At one point: NameError: `EOF` is not defined (likely a bad heredoc paste into a .py file)."
+      ],
+      "current_state": "Server can start (health OK), but some endpoints still 500 due to model/schema mismatches and/or missing DB tables."
+    },
+    {
+      "area": "/radar endpoint",
+      "symptoms": [
+        "POST /radar returns Internal Server Error.",
+        "Earlier log fragments included: NameError RadarItem not defined; then SQLAlchemy INSERT shown against radar_items followed by error code link (likely missing table or constraint)."
+      ],
+      "likely_root_causes": [
+        "Model name mismatch: router imports Radar/RadarItem but models.py exports something else.",
+        "Tables not created (Base.metadata.create_all not executed; no migrations).",
+        "Schema/DB mismatch after refactor."
+      ]
+    },
+    {
+      "area": "/tasks endpoints",
+      "symptoms": [
+        "POST /tasks sometimes returns 500 or later endpoints like /tasks/next return 500; curl piping to json.tool fails because response is plain 'Internal Server Error'.",
+        "Earlier log showed ImportError for TaskCompletion and then TaskCompletion missing in models."
+      ],
+      "likely_root_causes": [
+        "TaskCompletion model missing or wrongly named.",
+        "Task tables not created / schema mismatch."
+      ]
+    },
+    {
+      "area": "Knowledge sync",
+      "symptoms": [
+        "POST /knowledge/sync_local now returns errors for every file: AttributeError(\"type object 'KnowledgeItem' has no attribute 'user_id'\")"
+      ],
+      "likely_root_causes": [
+        "KnowledgeItem SQLAlchemy model definition missing `user_id` column while sync code expects it (for multi-user support, defaulting to 'default')."
+      ]
+    },
+    {
+      "area": "Invalid JSONs in base_conhecimento",
+      "symptoms": [
+        "Some JSON files are malformed (JSONDecodeError Expecting ',' delimiter).",
+        "User decided to postpone fixing malformed JSON files; will later build a Python fixer/analyzer."
+      ],
+      "affected_files_examples": [
+        "2025-09-05/analise-ftd-appsflyer-2025-09-05.json",
+        "2025-09-26/vaga_estagio.json",
+        "2025-08-20/adjust-raw-data-integration-2025-08-20.json"
+      ]
+    },
+    {
+      "area": "psql stuck on (END) pager",
+      "symptoms": [
+        "User got stuck at `(END)` in psql output."
+      ],
+      "fix": "Press `q` to exit the pager. Optionally disable pager with `\\pset pager off` or run `PAGER=cat psql ...`."
+    }
+  ],
+  "confirmed_working_signals": {
+    "docker": [
+      "docker compose ps shows both api and db containers Up.",
+      "psycopg import works in container; pgvector import works in container."
+    ],
+    "http": [
+      "GET http://127.0.0.1:8000/health returns {\"status\":\"ok\"}.",
+      "GET /openapi.json includes /radar, /tasks, /knowledge/* and /chat/*."
+    ]
+  },
+  "next_steps_priority_order": [
+    {
+      "step": 1,
+      "title": "Stabilize app/db/models.py and align names with routers",
+      "details": [
+        "Ensure models.py begins with `from __future__ import annotations` (if used) as the FIRST line.",
+        "Remove any stray heredoc tokens like `EOF` that might have been pasted into the file.",
+        "Export exactly the classes imported by routers: Task, TaskCompletion, RadarItem (or Radar), KnowledgeItem.",
+        "Make naming consistent: if the router uses RadarItem, keep that name; same for TaskCompletion.",
+        "Add `user_id` to KnowledgeItem (and to other user-scoped tables if that’s your design)."
+      ],
+      "acceptance_criteria": [
+        "`python3 -c \"import app.db.models as m; print(m.Task, m.TaskCompletion, m.RadarItem, m.KnowledgeItem)\"` works in container.",
+        "No import errors in `docker compose logs -f api` during startup."
+      ]
+    },
+    {
+      "step": 2,
+      "title": "Guarantee DB schema exists (create_all or migrations)",
+      "details": [
+        "If you are not using Alembic yet, call `Base.metadata.create_all(bind=engine)` on startup (init_db).",
+        "Confirm tables exist: `\\dt` in psql; verify radar_items, tasks, task_completions, knowledge_items (names depend on __tablename__).",
+        "For Postgres: vector extension is already installed; you can keep creating it manually or attempt it in init (ignore permission errors)."
+      ],
+      "acceptance_criteria": [
+        "POST /radar returns 200 and persists rows.",
+        "POST /tasks returns 200 and /tasks/next returns JSON list (not 500).",
+        "POST /knowledge/sync_local returns ok with created/updated/unchanged counts (except for known invalid JSONs)."
+      ]
+    },
+    {
+      "step": 3,
+      "title": "Fix Pydantic schemas and imports (app.schemas)",
+      "details": [
+        "If any module imports `app.schemas` but the file doesn’t exist, create it (or update imports to the correct module).",
+        "Keep request/response models close to the routers (e.g., app/api/schemas.py) to reduce circular imports."
+      ],
+      "acceptance_criteria": [
+        "All endpoints load without ImportError and OpenAPI generation works."
+      ]
+    },
+    {
+      "step": 4,
+      "title": "Implement Embeddings with OpenAI + pgvector",
+      "details": [
+        "Add OPENAI_API_KEY to .env and load it in settings.",
+        "Create an embedding pipeline that chunks each knowledge JSON into multiple text chunks (title/overview/steps/lessons).",
+        "Store each chunk with a vector column in Postgres (pgvector).",
+        "Add endpoints: /embeddings/reindex (optional) and use embeddings search in /knowledge/search or /chat/preview.",
+        "Decide vector dimension from chosen embedding model; set pgvector column accordingly (or leave unconstrained and validate length).",
+        "Privacy: embeddings-by-API sends text chunks to OpenAI; consider redaction of secrets and keep the raw knowledge stored locally."
+      ],
+      "acceptance_criteria": [
+        "A query like 'erro 403 gcs' returns top matches even when keywords differ (semantic search).",
+        "Chat preview shows relevant snippets and can be approved_ids for final respond."
+      ]
+    },
+    {
+      "step": 5,
+      "title": "Add the future 'Projects' layer for cross-LLM handoffs",
+      "details": [
+        "Define a Project entity: id, name, status, goals, artifacts, decisions, history log (jsonb), and links to knowledge items.",
+        "Store per-project 'handoff packets' so you can switch between ChatGPT/Claude/etc. without re-sending context.",
+        "Expose endpoints: /projects (CRUD), /projects/{id}/log, /projects/{id}/handoff (returns compact JSON)."
+      ]
+    }
+  ],
+  "quick_commands_for_the_next_engineer": {
+    "logs": [
+      "docker compose logs -f --tail=200 api",
+      "docker compose exec db psql -U assistant -d assistant -c \"\\dt\""
+    ],
+    "health": [
+      "curl -sS http://127.0.0.1:8000/health; echo",
+      "curl -sS http://127.0.0.1:8000/openapi.json | head -n 5"
+    ],
+    "radar_tests": [
+      "curl -sS -X POST http://127.0.0.1:8000/radar -H \"Content-Type: application/json\" -d '{\"title\":\"Teste Radar\",\"notes\":\"ok\",\"priority\":2}' ; echo",
+      "curl -sS http://127.0.0.1:8000/radar | python3 -m json.tool"
+    ],
+    "tasks_tests": [
+      "curl -sS -X POST http://127.0.0.1:8000/tasks -H \"Content-Type: application/json\" -d '{\"title\":\"Fazer fechamento\",\"priority\":1,\"rrule\":\"FREQ=MONTHLY;BYMONTHDAY=13\",\"start_date\":\"2025-12-16\"}' | python3 -m json.tool",
+      "curl -sS \"http://127.0.0.1:8000/tasks/next?days=40&date_ref=2025-12-16\" | python3 -m json.tool"
+    ],
+    "knowledge_tests": [
+      "curl -sS -X POST http://127.0.0.1:8000/knowledge/sync_local | python3 -m json.tool",
+      "curl -sS \"http://127.0.0.1:8000/knowledge/search?q=deepseek&limit=5\" | python3 -m json.tool"
+    ],
+    "chat_tests": [
+      "curl -sS -X POST http://127.0.0.1:8000/chat/preview -H \"Content-Type: application/json\" -d '{\"message\":\"Como resolvo erro 403 no upload pro GCS?\",\"use_context\":true,\"limit\":5}' | python3 -m json.tool",
+      "curl -sS -X POST http://127.0.0.1:8000/chat/respond -H \"Content-Type: application/json\" -d '{\"message\":\"Como resolvo erro 403 no upload pro GCS?\",\"use_context\":true,\"approved_ids\":[],\"temperature\":0.2,\"max_tokens\":600}' | python3 -m json.tool"
+    ],
+    "psql_pager_tip": [
+      "If psql shows (END): press q.",
+      "Disable pager: \\pset pager off"
+    ]
+  }
+}

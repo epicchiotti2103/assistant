@@ -1,0 +1,66 @@
+{
+  "id": "adjust-raw-data-integration-2025-08-20",
+  "data": "2025-08-20",
+  "autor": "Elio",
+  "projeto": "Adjust Raw Data Integration",
+  "tipo": "implementacao",
+  "contexto": "Organizar e disponibilizar dados brutos exportados pelo Adjust (via GCS) em uma tabela BigQuery para análises e cruzamento com dados de campanha. Stakeholders: equipe de BI e mobile marketing. Prazo: até fim do mês.",
+  "descricao": "Configuração de exportação raw data do Adjust para GCS, validação de permissões, teste de conectividade e criação de tabela externa no BigQuery usando padrões de URI.",
+  "passos": [
+    {
+      "etapa": "Configurar Raw Data Export no dashboard Adjust",
+      "motivo": "Obter arquivos CSV/GZIP com adjust_id em um bucket GCS",
+      "alternativas": [
+        "Usar API de relatórios (descartada: não retorna adjust_id)",
+        "SDK callback no app (descartada: exige mudança no client-side)",
+        "Raw Data Export (usada: método oficial, inclui adjust_id)",],
+      "codigo_detalhado": null,
+      "comandos_executados": [],
+      "resultados": "Tela de configuração no Adjust com upload do JSON de credenciais e seleção de atividades (install, session, event).",
+      "tempo_execucao": "10 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "Erro de permissão 403 ao testar upload no GCS",
+          "descoberta": "Conta de serviço adjust-raw-export não tinha papel storage.buckets.get",
+          "tentativas": [
+            "Tentativa 1: Atribuí apenas Criador de objetos do Storage → upload falhou por falta de GET",
+            "Tentativa 2: Testei com gsutil ls → 403 GET storage.buckets.get",
+            "Tentativa 3: Adicionei Visualizador de buckets do Cloud Storage → corrigiu",],
+          "solucao_final": "Adicionei papel 'Visualizador de buckets do Cloud Storage' à conta de serviço",
+          "tempo_perdido": "15 minutos",
+          "como_evitar": "Conceder sempre GET e WRITE ao mesmo tempo",}
+      ]
+    },
+    {
+      "etapa": "Testar conectividade GCS com script Python",
+      "motivo": "Validar credenciais JSON e nome do bucket antes de usar no Adjust",
+      "alternativas": [
+        "Usar gsutil diretamente (considerado mas preferido Python para logs detalhados)",
+        "Testar via dashboard Adjust (inviável para debug de IAM)",],
+      "codigo_detalhado": "``````",
+      "comandos_executados": [
+        "pip install google-cloud-storage",
+        "python3 gcs_test.py",],
+      "resultados": "Erro 403 GET no primeiro teste; bucket listado com sucesso após ajuste; upload de arquivo de teste bem-sucedido.",
+      "tempo_execucao": "7 minutos",
+      "problemas_enfrentados": []
+    },
+    {
+      "etapa": "Criar tabela externa no BigQuery",
+      "motivo": "Tornar dados do GCS consultáveis via SQL sem mover arquivos localmente",
+      "alternativas": [
+        "Importar CSV manualmente (descartado: baixa manutenção)",
+        "Criar pipeline Dataflow (descartado: complexidade desnecessária)",
+        "Tabela externa BigQuery (escolhida: simples e sem custo de storage adicional)",],
+      "codigo_detalhado": null,
+      "comandos_executados": [],
+      "resultados": "Erro "Not found: Uris gs://adjust_famyle/*.csv" inicialmente, pois não havia arquivos ainda; confirmado após chegada do primeiro arquivo.",
+      "tempo_execucao": "12 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "Not found: Uris gs://adjust_famyle/*.csv",
+          "descoberta": "Bucket vazio no momento da criação da tabela",
+          "tentativas": [
+            "Tentativa 1: Usar gs://adjust_famyle/**/*.csv (não suportado)",
+            "Tentativa 2: Listar subpastas manualmente (CSV em pastas de data)",
+            "Tentativa 3: Aguardar até primeiros arquivos chegarem",]

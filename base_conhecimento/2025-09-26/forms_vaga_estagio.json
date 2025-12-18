@@ -1,0 +1,439 @@
+{
+  "id": "caracol-form-api-2025-09-26",
+  "data": "2025-09-26",
+  "autor": "Elio Picchiotti",
+  "projeto": "Formulário Programa de Estágio – Frontend + API (Flask) + BigQuery + GCS + Nginx + TLS",
+  "tipo": "implementacao",
+  "contexto": "Construção de um formulário de candidatura para o Programa de Estágio da Caracol, com frontend em página estática (Hostinger/GitHub Pages) e backend próprio em VM GCP (Debian). Objetivo: receber respostas, validar, salvar no BigQuery e enviar CVs para um bucket GCS, publicando um endpoint público com HTTPS (api.caracol.media) e CORS liberado para caracol.media/www.caracol.media. Restrições: acesso IAM limitado para criar firewall; DNS no provedor externo; prazo curto com necessidade de publicar em produção no mesmo dia.",
+  "descricao": "Montei uma API Flask com duas rotas principais: /health (teste) e /api/form (POST multipart/form-data com campos do formulário e upload de CV). A API faz CORS, valida payload, ajusta tipos conforme schema do BigQuery e insere na tabela databasecaracol.recrutamento.candidatos_estagio. Se houver 'cv' (arquivo), faz upload em GCS (bucket caracol-cvs, pasta cvs/ANO/MES) e grava as URLs. Publiquei com Gunicorn em 127.0.0.1:8080, Nginx como reverse proxy em 80/443, TLS via Certbot/Let's Encrypt, e configurei DNS para api.caracol.media apontar para a VM (34.121.197.237). Ajustei CORS tanto no Flask quanto (opcionalmente) no Nginx para garantir o preflight. Depurei vários erros: CORS, HTTPS, NameError de env, schema BigQuery (arrays), duplicidade de /health no Nginx e 501 do SimpleHTTPServer durante um teste local.",
+  "passos": [
+    {
+      "etapa": "Preparar ambiente Python na VM e instalar dependências",
+      "motivo": "Isolar a aplicação em venv e garantir versões estáveis de Flask/Gunicorn/SDKs GCP.",
+      "alternativas": [
+        "Docker (não usada: overhead e tempo de empacotamento no prazo curto)",
+        "Cloud Run (considerada mas descartada por exigir empacotamento/imagens e ajuste de rede/DNS)",
+        "Gunicorn + Nginx em VM (usada – maior controle com stack conhecida e já com VM rodando)"
+      ],
+      "codigo_detalhado": "Criei venv, instalei pacotes exatos e confirmei versões. Usei Python 3.11 presente na VM.",
+      "comandos_executados": [
+        "python3 -m venv .venv",
+        "source .venv/bin/activate",
+        "pip install –upgrade pip",
+        "pip install flask gunicorn google-cloud-bigquery google-cloud-storage"
+      ],
+      "resultados": "pip instalou: flask-3.1.2, gunicorn-23.0.0, google-cloud-bigquery-3.38.0, google-cloud-storage-3.4.0; Python version: 3.11.2",
+      "tempo_execucao": "8 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "501 Unsupported method ('POST') ao testar com SimpleHTTPServer",
+          "descoberta": "O 501 veio de um servidor HTTP simples (SimpleHTTP/0.6 Python/3.13.7) e não do Gunicorn/Flask.",
+          "tentativas": [
+            "tentei POST direto em http://localhost:8080 quando quem estava atendendo era um servidor estático → 501",
+            "troquei para rodar gunicorn no 127.0.0.1:8080 e a requisição passou",
+            "garanti que Nginx estivesse encaminhando /api/ para 127.0.0.1:8080"
+          ],
+          "solucao_final": "Executar apenas Gunicorn no 8080 e não usar o servidor simples para a API.",
+          "tempo_perdido": "20 minutos",
+          "como_evitar": "Sempre confirmar o processo escutando a porta com ss -ltnp antes de testar."
+        }
+      ]
+    },
+    {
+      "etapa": "Desenvolver API Flask com rota /api/form e CORS",
+      "motivo": "Receber dados do formulário e permitir submissões via navegador a partir do domínio público.",
+      "alternativas": [
+        "CORS somente via Nginx (não usada como única camada: preferi redundância no app e no proxy)",
+        "Usar flask-cors (considerada; descartei para evitar nova dependência; implementei manualmente)",
+        "CORS manual no Flask + opcionais no Nginx (usada – controle fino e compatibilidade)"
+      ],
+      "codigo_detalhado": "A rota OPTIONS responde 204 com cabeçalhos CORS; a POST valida/normaliza dados, faz upload opcional do CV para GCS e insere linha no BigQuery. Cabeçalhos: Access-Control-Allow-Origin: https://caracol.media,https://www.caracol.media; Allow-Methods: POST,OPTIONS; Allow-Headers: Content-Type; Max-Age: 3600.",
+      "comandos_executados": [
+        "gunicorn -w 2 -b 127.0.0.1:8080 app:app",
+        "curl -i http://127.0.0.1:8080/health"
+      ],
+      "resultados": "HTTP/1.1 200 OK na /health local e, depois, via Nginx com Host header.",
+      "tempo_execucao": "40 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "NameError: name 'BQ_TABLE' is not defined (no journal do systemd/gunicorn)",
+          "descoberta": "Ao mover validação de schema para topo do módulo, a env não existia no momento do import.",
+          "tentativas": [
+            "botei table = bq_client.get_table(BQ_TABLE) no topo do arquivo → quebrou",
+            "reiniciei serviço com env no unit systemd → ainda no topo, falhava antes de carregar o app",
+            "mudei o get_table() para dentro da função que lida com a requisição"
+          ],
+          "solucao_final": "Ler env no topo mas fazer get_table() e schema mapping dentro do handler /api/form.",
+          "tempo_perdido": "25 minutos",
+          "como_evitar": "Evitar chamadas que dependem de env/serviços externos no import-time; fazer lazy init."
+        },
+        {
+          "erro": "BigQuery insert error: 'Repeated value added outside of an array, field: skills.'",
+          "descoberta": "Os campos skills e questionario são REPEATED/ARRAY no schema e precisam receber uma lista, não string simples.",
+          "tentativas": [
+            "mandei 'skills' como string 'Excel' → erro de schema",
+            "mandei 'skills' como '[]' string (sem parse) → BigQuery ainda interpreta como string",
+            "passei a parsear JSON de skills/questionario (JSON.parse no frontend; json.loads no backend) e normalizar"
+          ],
+          "solucao_final": "Garantir que backend receba texto JSON e converta para lista Python; no insert, enviar como array.",
+          "tempo_perdido": "35 minutos",
+          "como_evitar": "Especificar o schema do BQ e a forma de serialização no contrato API."
+        }
+      ]
+    },
+    {
+      "etapa": "Configurar Nginx como reverse proxy (80/443) para o Gunicorn",
+      "motivo": "Expor a API com TLS e performance, e separar aplicação do front door HTTP.",
+      "alternativas": [
+        "Gunicorn direto em 0.0.0.0:443 (não usada: sem TLS gerenciado e sem features proxy)",
+        "Caddy (considerada: auto-TLS; descartada por padronização e já ter Nginx instalado)",
+        "Nginx + Certbot (usada – stack comum, suporte amplo)"
+      ],
+      "codigo_detalhado": "Blocos server: um para 80 (redirect) e outro para 443 com ssl_certificate/ssl_certificate_key do Let's Encrypt; location /api/ faz proxy_pass para http://127.0.0.1:8080$request_uri; location = /health retorna 200.",
+      "comandos_executados": [
+        "sudo tee /etc/nginx/sites-available/caracol-api",
+        "sudo ln -s /etc/nginx/sites-available/caracol-api /etc/nginx/sites-enabled/caracol-api",
+        "sudo nginx -t && sudo systemctl restart nginx",
+        "ss -ltnp | grep -E ':80|:443'"
+      ],
+      "resultados": "Nginx escutando em :80 e :443, Gunicorn em 127.0.0.1:8080; /health via Host SNI funcionou.",
+      "tempo_execucao": "30 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "duplicate location `health` em /etc/nginx/sites-enabled/caracol-api:59",
+          "descoberta": "Dois blocos location = /health no mesmo server depois de rodar certbot/ajustes.",
+          "tentativas": [
+            "recarregar nginx ignorando o erro → falhou nginx -t",
+            "remover um dos blocos e manter apenas um location = /health por server",
+            "validar com nginx -t e reload"
+          ],
+          "solucao_final": "Um único location = /health por server; teste OK.",
+          "tempo_perdido": "10 minutos",
+          "como_evitar": "Revisar diffs após certbot que reescreve blocos; evitar duplicatas."
+        },
+        {
+          "erro": "HTTPS não respondia externamente (curl -vkI travava na conexão)",
+          "descoberta": "Faltavam regras de firewall 443 no projeto/instância; eu tinha liberado só 80.",
+          "tentativas": [
+            "tentar abrir firewall via gcloud sem permissão IAM → erro 'Required compute.firewalls.create permission'",
+            "solicitar liberação 443 no painel (Português) e confirmar com dig/curl",
+            "após liberar, HTTPS passou a responder"
+          ],
+          "solucao_final": "Abrir porta TCP 443 no firewall do projeto/rede; confirmar com curl -I https://api.caracol.media/health",
+          "tempo_perdido": "35 minutos",
+          "como_evitar": "Checklist de portas (80/443) antes de TLS; confirmar IAM ou pedir a alguém com papel Owner."
+        }
+      ]
+    },
+    {
+      "etapa": "Emitir certificado Let's Encrypt com Certbot (nginx plugin)",
+      "motivo": "Habilitar HTTPS com certificado válido e renovação automática.",
+      "alternativas": [
+        "Certificado autoassinado (não usada: browsers bloqueiam)",
+        "Cloudflare proxy/SSL (considerada: mas a origem precisava responder certinho primeiro)",
+        "Certbot –nginx (usada – automatiza configuração e renovação)"
+      ],
+      "codigo_detalhado": "certbot –nginx -d api.caracol.media; aceito ToS; e-mail elio.picchiotti@caracol.media; opção 1 para reinstalar; força redirect http→https.",
+      "comandos_executados": [
+        "sudo certbot –nginx -d api.caracol.media",
+        "sudo systemctl status nginx",
+        "curl -I https://api.caracol.media/health"
+      ],
+      "resultados": "Successfully deployed certificate for api.caracol.media to /etc/nginx/sites-enabled/caracol-api; HTTP/2 200 content-type: text/plain.",
+      "tempo_execucao": "15 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "Menu do certbot dizendo 'Certificate not yet due for renewal'",
+          "descoberta": "Certbot já tinha gerado uma vez; usei opção 1 (reinstall).",
+          "tentativas": [
+            "rodar certbot novamente com -d → aparece menu",
+            "selecionar 1 (Attempt to reinstall) → OK"
+          ],
+          "solucao_final": "Reinstalei e confirmei redirect; HTTPS ok.",
+          "tempo_perdido": "5 minutos",
+          "como_evitar": "Saber que certbot guarda estado em /etc/letsencrypt/renewal/."
+        }
+      ]
+    },
+    {
+      "etapa": "Configurar serviço systemd para a API (Gunicorn)",
+      "motivo": "Rodar o backend em background, iniciar no boot e facilitar restart/logs.",
+      "alternativas": [
+        "screen/tmux manual (não usada: frágil)",
+        "supervisord (considerada; mas systemd já disponível)",
+        "systemd service (usada – padrão Debian)"
+      ],
+      "codigo_detalhado": "Unit file com User, WorkingDirectory, Environment (BQ_TABLE, GCS_BUCKET, ALLOWED_ORIGIN), ExecStart para Gunicorn, Restart=on-failure.",
+      "comandos_executados": [
+        "sudo tee /etc/systemd/system/caracol-form.service <<'EOF' … EOF",
+        "sudo systemctl daemon-reload",
+        "sudo systemctl enable caracol-form",
+        "sudo systemctl start caracol-form",
+        "sudo journalctl -u caracol-form -f"
+      ],
+      "resultados": "Service ativo; Listening at: http://127.0.0.1:8080; workers up.",
+      "tempo_execucao": "10 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "Restart loop por NameError BQ_TABLE (ver etapa 2)",
+          "descoberta": "Ambiente carregado, mas código acessava BQ_TABLE cedo demais.",
+          "tentativas": [
+            "mover leitura/uso da env para dentro do handler",
+            "reiniciar serviço"
+          ],
+          "solucao_final": "Lazy init do schema BigQuery durante a request.",
+          "tempo_perdido": "15 minutos",
+          "como_evitar": "Desacoplar init pesado do import do módulo."
+        }
+      ]
+    },
+    {
+      "etapa": "Ajustar DNS e testar resolução",
+      "motivo": "Apontar api.caracol.media para o IP da VM (34.121.197.237).",
+      "alternativas": [
+        "AAAA IPv6 (não usada: sem necessidade)",
+        "CNAME para apex (considerada: mas preferi A direto)",
+        "A record (usada – simples e já funcional)"
+      ],
+      "codigo_detalhado": "Criado A record para api → 34.121.197.237 no provedor. TTL 300.",
+      "comandos_executados": [
+        "dig +short api.caracol.media",
+        "curl -I http://api.caracol.media/health",
+        "curl -vkI https://api.caracol.media/health"
+      ],
+      "resultados": "dig retornou 34.121.197.237; HTTP 200 em /health; depois HTTPS 200 quando firewall/tls OK.",
+      "tempo_execucao": "10 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "404 em http://127.0.0.1/health (sem Host header)",
+          "descoberta": "Nginx vhost por server_name; sem Host correto, cai no default.",
+          "tentativas": [
+            "curl -i -H 'Host: api.caracol.media' http://127.0.0.1/health → 200 ok",
+            "confirmado SNI/Host-based routing"
+          ],
+          "solucao_final": "Sempre testar com Host correto em localhost.",
+          "tempo_perdido": "5 minutos",
+          "como_evitar": "Usar -H 'Host: dominio' nos testes locais com Nginx."
+        }
+      ]
+    },
+    {
+      "etapa": "Conectar frontend e depurar CORS/preflight",
+      "motivo": "Garantir envio do formulário a partir de https://caracol.media/programadeestagio/.",
+      "alternativas": [
+        "Permitir '*' no Access-Control-Allow-Origin (não usada: risco; mantive whitelisting do domínio)",
+        "Adicionar cabeçalhos custom (não usada: geram preflight extra; mantive sem headers custom)",
+        "Liberar apenas Content-Type (usada – suficiente para multipart/form-data)"
+      ],
+      "codigo_detalhado": "JS no site faz fetch com FormData sem headers custom; backend responde OPTIONS 204 com allow origin específico.",
+      "comandos_executados": [
+        "DevTools Network: observar OPTIONS /api/form e POST /api/form",
+        "curl -i -X OPTIONS https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: Content-Type'",
+        "curl -i -X POST https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -F nomePreferido=Teste -F email=teste@caracol.media -F cidadeEstado=SP -F curso=ADM -F ingles=Intermediário -F trilha='Vendas & Marketing' -F skills='[]' -F questionario='[]'"
+      ],
+      "resultados": "OPTIONS 204 com Access-Control-Allow-Origin: https://caracol.media,https://www.caracol.media; POST 200 {\"ok\":true}. Network do site mostra as requisições. Quando havia erro de array BQ, resposta 500 com JSON explicando.",
+      "tempo_execucao": "45 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "Failed to fetch no navegador (sem status legível)",
+          "descoberta": "Erro típico de CORS/preflight/mixed-content ou bloqueio antes de resposta; confirmado que era CORS/headers e/ou arquivo grande.",
+          "tentativas": [
+            "testei GET /health via fetch() no console → OK",
+            "testei POST mínimo sem arquivo → OK",
+            "com arquivo grande ou cabeçalho extra → falhou; ajustei e funcionou"
+          ],
+          "solucao_final": "Manter apenas Content-Type, sem headers custom; garantir client_max_body_size 15M e arquivos ≤ 10MB; liberar Origins corretos.",
+          "tempo_perdido": "30 minutos",
+          "como_evitar": "Sempre testar OPTIONS e POST mínimo no console do site antes do submit real."
+        },
+        {
+          "erro": "Formulário não encontrado: #form-estagio",
+          "descoberta": "Script executando antes do DOM ou ID divergente.",
+          "tentativas": [
+            "mover script para o fim do body",
+            "confirmar <form id=\"form-estagio\">",
+            "usar DOMContentLoaded para bindar eventos"
+          ],
+          "solucao_final": "Script roda após DOM e form tem ID correto.",
+          "tempo_perdido": "10 minutos",
+          "como_evitar": "Padrão: scripts de interação no fim do body ou com DOMContentLoaded."
+        }
+      ]
+    },
+    {
+      "etapa": "Normalizar payload para BigQuery (arrays, strings, nulls, datas)",
+      "motivo": "Evitar erros de schema ao inserir no BQ.",
+      "alternativas": [
+        "Inserir tudo como STRING e usar views (não usada: perderia semântica e validação)",
+        "Transformar no app e inserir tipado (usada – melhor consistência)",
+        "Transformar via Dataflow/ETL posterior (considerada; overkill para este fluxo)"
+      ],
+      "codigo_detalhado": "No handler: mapear schema do BQ; converter skills/questionario via json.loads (se vier string); campos vazios → None; datas ISO; CV URL anexada se houver upload.",
+      "comandos_executados": [
+        "journalctl -u caracol-form -f (para ver insert errors)",
+        "consulta BigQuery para validar linhas chegando"
+      ],
+      "resultados": "Inserts 200 OK no teste, registros visíveis no dataset; erro de array resolvido.",
+      "tempo_execucao": "30 minutos",
+      "problemas_enfrentados": [
+        {
+          "erro": "Repeated value added outside of an array (skills)",
+          "descoberta": "Expectativa de REPEATED no BQ",
+          "tentativas": [
+            "enviar string simples",
+            "enviar '[]' sem parse",
+            "enviar lista Python após json.loads"
+          ],
+          "solucao_final": "Parse JSON e enviar lista.",
+          "tempo_perdido": "20 minutos",
+          "como_evitar": "Documentar contrato: campos X e Y são arrays JSON."
+        }
+      ]
+    }
+  ],
+  "ambiente_tecnico": {
+    "linguagem": "Python (backend), JavaScript (frontend), Nginx (proxy)",
+    "versao": "Python 3.11.2; Flask 3.1.2; Gunicorn 23.0.0; google-cloud-bigquery 3.38.0; google-cloud-storage 3.4.0; Debian bookworm (kernel 6.1.0-37-cloud-amd64); Nginx 1.22.1-9+deb12u3; Certbot 2.1.0-4; Chrome 139; Safari 18.6",
+    "dependencias": [
+      "flask==3.1.2 (APIs leves, estável)",
+      "gunicorn==23.0.0 (WSGI production server)",
+      "google-cloud-bigquery==3.38.0 (client BQ atual)",
+      "google-cloud-storage==3.4.0 (upload CVs para GCS)"
+    ],
+    "configuracoes_ambiente": [
+      "SO: Debian GNU/Linux 12 (bookworm) em VM GCP us-central1-a",
+      "Portas: gunicorn 127.0.0.1:8080; Nginx 0.0.0.0:80/443",
+      "Variáveis: BQ_TABLE=databasecaracol.recrutamento.candidatos_estagio; GCS_BUCKET=caracol-cvs; ALLOWED_ORIGIN=https://caracol.media,https://www.caracol.media"
+    ],
+    "estrutura_arquivos": "/home/eliosp20048/caracol-form/app.py; venv em /home/eliosp20048/caracol-form/.venv; systemd unit /etc/systemd/system/caracol-form.service; Nginx vhost /etc/nginx/sites-available/caracol-api (symlink em sites-enabled); Certs em /etc/letsencrypt/live/api.caracol.media/"
+  },
+  "exemplos_reais": {
+    "input_exemplo": "POST multipart/form-data com campos nomePreferido, email, cidadeEstado, curso, ingles, trilha, skills='[\"Sheets\",\"Análise\"]', questionario='[{\"q\":\"1\",\"a\":\"…\"}]' e arquivo cv (PDF ≤ 10MB)",
+    "output_amostra": "{\"ok\": true, \"cv_gcs_uri\": \"gs://caracol-cvs/cvs/2025/09/uuid.pdf\", \"cv_public_url\": \"https://storage.googleapis.com/caracol-cvs/cvs/2025/09/uuid.pdf\"}",
+    "comando_execucao": "curl -i -X POST https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -F nomePreferido='Teste' -F email='teste@caracol.media' -F cidadeEstado='SP' -F curso='ADM' -F ingles='Intermediário' -F trilha='Vendas & Marketing' -F skills='[]' -F questionario='[]'",
+    "parametros_usados": "Sem headers custom; Content-Type automático do multipart; Origin definido pelo browser"
+  },
+  "metricas_performance": {
+    "tempo_total": "Request típica < 400 ms sem upload; com upload ~700–1200 ms (rede).",
+    "volume_dados": "PDF até 10 MB; payload textual ~1–200 KB.",
+    "recursos_utilizados": "Gunicorn 3 workers; memória ~120–250 MB; CPU baixa em idle; Nginx ~2.5 MB."
+  },
+  "validacao_testes": {
+    "como_testou": "curl local e externo; DevTools Network; logs Nginx e systemd; consultas no BigQuery.",
+    "casos_teste": [
+      "POST sem CV",
+      "POST com CV ≤10MB",
+      "OPTIONS (preflight)",
+      "Campos array como string vs JSON",
+      "Arquivo >15MB (espera 413/Failed to fetch)"
+    ],
+    "resultados_esperados": "200 OK com ok:true e URLs quando CV presente; 204 no OPTIONS; 4xx/5xx com JSON de erro quando schema inválido.",
+    "edge_cases": "Campos vazios viram null; arrays vazios permitidos; ausência de questionário → []"
+  },
+  "arquivos_gerados": [
+    {
+      "nome": "app.py",
+      "localizacao": "/home/eliosp20048/caracol-form/app.py",
+      "descricao": "Código da API Flask",
+      "tamanho_aproximado": "6 KB"
+    },
+    {
+      "nome": "caracol-api (vhost nginx)",
+      "localizacao": "/etc/nginx/sites-available/caracol-api",
+      "descricao": "Reverse proxy + TLS",
+      "tamanho_aproximado": "0.6 KB"
+    }
+  ],
+  "decisoes": [
+    {
+      "topico": "CORS no app e no proxy",
+      "contexto_decisao": "Falhas esporádicas de preflight e caches intermediários",
+      "alternativas_consideradas": [
+        "Somente no app",
+        "Somente no Nginx"
+      ],
+      "criterios_decisao": "Redundância, simplicidade operacional",
+      "impacto": "Menos erros de CORS em ambientes variados",
+      "risco_aceito": "Cabeçalho duplicado (ok com same value)"
+    },
+    {
+      "topico": "Salvar arrays como JSON no request e converter no backend",
+      "contexto_decisao": "Schema REPEATED do BigQuery",
+      "alternativas_consideradas": [
+        "Enviar campos múltiplos (name[]=x)",
+        "Enviar JSON e parsear"
+      ],
+      "criterios_decisao": "Compatibilidade e clareza",
+      "impacto": "Menos ambiguidade de tipagem",
+      "risco_aceito": "Necessidade de validação do JSON"
+    }
+  ],
+  "licoes_aprendidas": [
+    "Erros de CORS se mascaram como 'Failed to fetch' sem status — sempre testar OPTIONS e GET simples.",
+    "Não acessar serviços externos (BQ get_table) no import do módulo; fazer lazy init.",
+    "Ao usar vhosts, teste com Host header local.",
+    "Certbot pode reescrever blocos no Nginx — revisar duplicidades.",
+    "Documentar contrato de payload (arrays, limites de tamanho)."
+  ],
+  "comandos_uteis": [
+    "gunicorn -w 3 -b 127.0.0.1:8080 app:app",
+    "sudo journalctl -u caracol-form -f",
+    "sudo tail -f /var/log/nginx/access.log /var/log/nginx/error.log",
+    "curl -i -X OPTIONS https://api.caracol.media/api/form -H 'Origin: https://caracol.media' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: Content-Type'",
+    "curl -i https://api.caracol.media/health",
+    "ss -ltnp | grep -E ':80|:443|:8080'"
+  ],
+  "referencias": [
+    {
+      "tipo": "documentacao",
+      "titulo": "Flask – Patterns for handling CORS",
+      "url": "https://flask.palletsprojects.com/",
+      "data_consulta": "2025-09-26",
+      "relevancia": "Como responder OPTIONS e setar headers"
+    },
+    {
+      "tipo": "documentacao",
+      "titulo": "Let's Encrypt Certbot (Nginx)",
+      "url": "https://certbot.eff.org/",
+      "data_consulta": "2025-09-26",
+      "relevancia": "Automatização de TLS no Nginx"
+    },
+    {
+      "tipo": "documentacao",
+      "titulo": "BigQuery Python Client",
+      "url": "https://cloud.google.com/bigquery/docs/reference/libraries",
+      "data_consulta": "2025-09-26",
+      "relevancia": "InsertRows JSON e tipos REPEATED"
+    }
+  ],
+  "proximos_passos": [
+    {
+      "item": "Adicionar retry idempotente no backend (X-Request-Id)",
+      "prioridade": "média",
+      "estimativa": "2 horas",
+      "dependencias": "Nenhuma"
+    },
+    {
+      "item": "Criar visão no BQ e dashboard Looker Studio",
+      "prioridade": "média",
+      "estimativa": "4 horas",
+      "dependencias": "Dados já entrando"
+    },
+    {
+      "item": "Página de confirmação e link do CV armazenado",
+      "prioridade": "baixa",
+      "estimativa": "1 hora",
+      "dependencias": "Manter public URL do GCS"
+    }
+  ],
+  "troubleshooting_futuro": {
+    "problemas_possiveis": [
+      "413 Request Entity Too Large se CV > limite Nginx",
+      "500 BigQuery schema mismatch se arrays vierem como string",
+      "CORS bloqueado se Origin não bater (www vs sem www)"
+    ],
+    "como_debugar": "Testar OPTIONS e POST com curl; checar access.log e journalctl; confirmar headers Allow-Origin/Methods/Headers.",
+    "logs_importantes": "/var/log/nginx/access.log, /var/log/nginx/error.log, journalctl -u caracol-form"
+  },
+  "comentarios": "A API já responde em HTTPS e grava no BigQuery quando o payload está no formato correto (arrays em JSON). O frontend deve manter FormData sem headers custom (evitar preflight extra). O bucket GCS armazena o CV e retorna public URL para consulta. Qualquer mudança de domínio exige atualizar ALLOWED_ORIGIN no serviço."
+}

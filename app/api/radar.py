@@ -1,53 +1,38 @@
-from typing import Optional
+from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.db.models import RadarItem
+from app.db.models import Radar
 
 router = APIRouter(prefix="/radar", tags=["radar"])
-
-DEFAULT_USER_ID = "default"  # V1: depois vira auth/multiusuário
 
 
 class RadarCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
-    notes: Optional[str] = None
+    notes: str | None = None
     priority: int = Field(default=3, ge=1, le=5)
 
 
 class RadarOut(BaseModel):
     id: int
     title: str
-    notes: Optional[str]
+    notes: str | None
     priority: int
-
-
-@router.post("", response_model=dict)
-def create_radar(payload: RadarCreate, db: Session = Depends(get_db)):
-    item = RadarItem(
-        user_id=DEFAULT_USER_ID,
-        title=payload.title,
-        notes=payload.notes,
-        priority=payload.priority,
-    )
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    return {"ok": True, "id": item.id}
 
 
 @router.get("", response_model=list[RadarOut])
 def list_radar(db: Session = Depends(get_db)):
-    items = (
-        db.query(RadarItem)
-        .filter(RadarItem.user_id == DEFAULT_USER_ID)
-        .order_by(RadarItem.priority.asc(), RadarItem.created_at.desc())
-        .all()
-    )
-    return [
-        RadarOut(id=i.id, title=i.title, notes=i.notes, priority=i.priority)
-        for i in items
-    ]
+    rows = db.query(Radar).order_by(Radar.priority.asc(), Radar.id.desc()).all()
+    return [RadarOut(id=r.id, title=r.title, notes=r.notes, priority=r.priority) for r in rows]
+
+
+@router.post("", response_model=dict)
+def create_radar(payload: RadarCreate, db: Session = Depends(get_db)):
+    item = Radar(title=payload.title, notes=payload.notes, priority=payload.priority)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return {"ok": True, "id": item.id}
